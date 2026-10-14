@@ -10,6 +10,7 @@ import { PROTOCOL_VERSION } from "../../contracts/index.ts";
 
 process.env.AGENTLINK_HUB_LOG ??= join(mkdtempSync(join(tmpdir(), "agentlink-hub-log-")), "hub.log");
 const { Hub } = await import("../src/hub.ts");
+const { Advertiser, installMdnsCrashGuard, isMdnsError } = await import("../src/mdns.ts");
 
 const TOKEN = "smoke-token";
 const dir = mkdtempSync(join(tmpdir(), "agentlink-hub-"));
@@ -100,7 +101,7 @@ try {
     check((await bad.waitClose()) === 4001, "wrong token -> close 4001");
     const silent = new Client();
     await silent.opened;
-    check((await silent.waitClose()) === 4001, "no hello within timeout -> close 4001");
+    check((await silent.waitClose(5000)) === 4001, "no hello within timeout -> close 4001");
     const health = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json());
     check(health.ok && health.hub_name === "smoke", "GET /api/health open without token");
     const noAuth = await fetch(`http://127.0.0.1:${port}/api/sessions`);
@@ -231,6 +232,31 @@ try {
   check(await sam2.waitFor((f) => f.op === "deliver" && f.envelope.id === e7.id), "pending delivery survives hub restart");
   check(((await api(`/api/messages/${e1.id}`)).body as StoredMessage).state === "delivered", "history survives restart");
   sam2.close();
+
+  console.error("mdns failures are non-fatal");
+  const healthOk = async () => (await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()).catch(() => null))?.ok === true;
+  const adv = new Advertiser({ name: `agentlink-smoke-${process.pid}`, port, hubId: hub.hubId, retryMs: 200 });
+  adv.start();
+  check(adv.starts === 1 && adv.bonjour, "advertiser publishes");
+  const errno = (msg: string, code: string) => Object.assign(new Error(msg), { code });
+  (adv.bonjour as any).server.mdns.emit("error", errno("bind EADDRINUSE 0.0.0.0:5353", "EADDRINUSE"));
+  check(await healthOk(), "mdns socket 'error' event -> hub still answers /api/health");
+  await sleep(400);
+  check(adv.starts >= 2, "advertiser re-publishes after retry delay");
+  (adv.bonjour as any).server.errorCallback(errno("send EHOSTUNREACH 224.0.0.251:5353", "EHOSTUNREACH"));
+  check(await healthOk(), "bonjour errorCallback (EHOSTUNREACH) -> hub still answers /api/health");
+  await sleep(400);
+  check(adv.starts >= 3, "advertiser re-publishes after send failure");
+  await adv.stop();
+  installMdnsCrashGuard();
+  const thrown = errno("send EHOSTUNREACH 224.0.0.251:5353", "EHOSTUNREACH");
+  thrown.stack = "Error: send EHOSTUNREACH 224.0.0.251:5353\n    at Socket.<anonymous> (/x/node_modules/bonjour-service/dist/lib/mdns-server.js:16:91)";
+  setTimeout(() => {
+    throw thrown;
+  }, 0);
+  await sleep(100);
+  check(await healthOk(), "uncaught error from bonjour stack -> logged, hub keeps serving");
+  check(!isMdnsError(new Error("unrelated")), "crash guard only matches bonjour/multicast-dns stacks");
 } catch (err) {
   failures++;
   console.error("smoke test crashed:", err);
