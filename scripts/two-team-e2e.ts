@@ -2,21 +2,24 @@
 // (a throwaway tmux session of 5 `cat` panes plus a registry in ~/.claude4/c4e2e-<user>/) and a
 // bridge, all started through scripts/team-up.sh. Never touches the real claude4 session.
 //
-//   npx tsx scripts/two-team-e2e.ts        (AGENTLINK_BASE_PORT, default 7790: hub, +1 alex, +2 sam)
+//   npx tsx scripts/two-team-e2e.ts        (AGENTLINK_BASE_PORT, default 7730: hub, +1 alex, +2 sam)
 //
 // Prints PASS/FAIL per check, always tears down (team-down.sh for both users, kills the two tmux
 // sessions, removes the fake registries) and exits non-zero on any failure.
+// Step 6 covers live screens (contracts/screens.md): alex shares, sam doesn't, read through a
+// ui-role hub socket the way the web UI reads them.
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { InboxItem, UserPresence } from "../contracts/index.ts";
+import type { InboxItem, ScreenInfo, ServerFrame, UserPresence } from "../contracts/index.ts";
+import { PROTOCOL_VERSION } from "../contracts/index.ts";
 
 const run = promisify(execFile);
 const ROOT = path.resolve(import.meta.dirname, "..");
-const BASE = Number(process.env.AGENTLINK_BASE_PORT ?? 7790);
+const BASE = Number(process.env.AGENTLINK_BASE_PORT ?? 7730);
 const HUB = BASE;
 const PORT = { alex: BASE + 1, sam: BASE + 2 } as const;
 type User = keyof typeof PORT;
@@ -90,20 +93,63 @@ async function send(from: User, to: string, type: string, body: string) {
   return r.body.id as string;
 }
 
-async function teamUp(u: User, extra: string[] = []) {
+/** Run team-up.sh for one user; returns its stdout (the summary). */
+async function teamUp(u: User, extra: string[] = [], extraEnv: Record<string, string> = {}): Promise<string> {
   const args =
     u === "alex"
       ? ["--host-hub", "--hub-port", String(HUB)]
       : ["--hub-url", `http://127.0.0.1:${HUB}`];
-  await run(
+  const r = await run(
     path.join(ROOT, "scripts", "team-up.sh"),
     [...args, "--user", u, "--daemon-port", String(PORT[u]), "--c4-session", session(u), "--no-ui", ...extra],
     {
-      env: { ...process.env, AGENTLINK_DATA_DIR: dataDir(u), AGENTLINK_TOKEN: TOKEN, C4_TMUX_SOCKET: SOCKET, C4_STATE_DIR: c4Dir(u) },
+      env: {
+        ...process.env,
+        AGENTLINK_DATA_DIR: dataDir(u),
+        AGENTLINK_TOKEN: TOKEN,
+        C4_TMUX_SOCKET: SOCKET,
+        C4_STATE_DIR: c4Dir(u),
+        ...extraEnv,
+      },
       timeout: 60_000,
     },
   );
+  return r.stdout;
 }
+
+const pidsOf = (u: User) =>
+  Object.fromEntries(
+    fs
+      .readFileSync(path.join(dataDir(u), "team.pids"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => l.split(" ") as [string, string]),
+  );
+const localEnv = (u: User) => fs.readFileSync(path.join(dataDir(u), "local.env"), "utf8");
+
+/** A ui-role hub socket, as the web UI opens it. Collects every frame. */
+async function uiSocket(subscribe: string[] | "*") {
+  const frames: { at: number; frame: ServerFrame }[] = [];
+  const ws = new WebSocket(`ws://127.0.0.1:${HUB}/ws`);
+  ws.addEventListener("message", (ev) => {
+    try {
+      frames.push({ at: Date.now(), frame: JSON.parse(String(ev.data)) as ServerFrame });
+    } catch {
+      // ignore non-JSON
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    ws.addEventListener("open", () => resolve(), { once: true });
+    ws.addEventListener("error", () => reject(new Error("ui socket failed to open")), { once: true });
+  });
+  ws.send(JSON.stringify({ op: "hello", token: TOKEN, role: "ui", user: "alex", protocol: PROTOCOL_VERSION }));
+  await until("ui welcome", async () => frames.some((f) => f.frame.op === "welcome"), 5_000);
+  ws.send(JSON.stringify({ op: "screens.subscribe", addresses: subscribe }));
+  return { ws, frames, close: () => ws.close() };
+}
+type Screen = Extract<ServerFrame, { op: "screen" }>;
+const screensFor = (frames: { at: number; frame: ServerFrame }[], address: string) =>
+  frames.filter((f): f is { at: number; frame: Screen } => f.frame.op === "screen" && f.frame.address === address);
 
 async function teamDown(u: User) {
   return run(path.join(ROOT, "scripts", "team-down.sh"), [], {
@@ -145,7 +191,8 @@ async function makeFakeTeam(u: User) {
   for (const slot of slots) {
     const p = panes[u][slot];
     await tmux("set", "-p", "-t", p, "@role", slot === 0 ? "orchestrator" : "worker");
-    await tmux("set", "-p", "-t", p, "@state", "idle");
+    // the bridge sends a worker's @task only while it isn't idle/done, so the fake workers are "working"
+    await tmux("set", "-p", "-t", p, "@state", slot === 0 ? "idle" : "working");
     if (slot !== 0) await tmux("set", "-p", "-t", p, "@task", `fake task ${slot}`);
   }
 }
@@ -162,8 +209,11 @@ async function main() {
   await step("setup: fake c4 teams and team-up.sh for both users", async () => {
     for (const u of USERS) await makeFakeTeam(u);
     check("two tmux sessions with 5 cat panes each, registries written", true);
-    await teamUp("alex");
-    await teamUp("sam");
+    const summary = { alex: await teamUp("alex"), sam: await teamUp("sam") };
+    for (const u of USERS) {
+      check(`${u}: summary says screens are not shared (no --share-screens)`, summary[u].includes("screens    not shared"), summary[u]);
+      check(`${u}: local.env records AGENTLINK_SHARE_SCREENS=0`, localEnv(u).includes("AGENTLINK_SHARE_SCREENS=0"));
+    }
     for (const u of USERS) {
       const h = (await api(u, "GET", "/v1/health")).body;
       check(`${u}: daemon connected to the hub`, h.hub.state === "connected", h.hub);
@@ -269,8 +319,13 @@ async function main() {
     check("default: message for alex/worker-3 goes to the orchestrator, labelled (for: alex/worker-3)", s0.includes("(for: alex/worker-3)"), s0.slice(-400));
     check("default: not pasted into slot 3", !(await screen("alex", 3)).includes(h1));
 
-    await stopBridge("alex");
-    await teamUp("alex", ["--direct"]);
+    const before = pidsOf("alex");
+    const out = await teamUp("alex", ["--restart-bridge", "--direct"]);
+    const after = pidsOf("alex");
+    check("--restart-bridge: new bridge pid", !!after.bridge && after.bridge !== before.bridge, { before, after });
+    check("--restart-bridge: hub and daemon untouched", after.hub === before.hub && after.daemon === before.daemon, { before, after });
+    check("--restart-bridge: summary says so", out.includes("bridge restarted for alex") && out.includes("hub, daemon and UI untouched"), out);
+    check("--restart-bridge --direct: recorded in local.env", localEnv("alex").includes("AGENTLINK_BRIDGE_DIRECT=1"));
     const direct = await send("sam", "alex/worker-3", "chat", "two-team e2e: for worker 3 (direct mode)");
     const h2 = `[agentlink chat from sam/orchestrator · id ${direct.slice(0, 8)}]`;
     await until("direct message in alex slot 3", async () => (await screen("alex", 3)).includes(h2));
@@ -278,6 +333,87 @@ async function main() {
     await sleep(3_000);
     check("DIRECT=1: not pasted into the orchestrator pane", !(await screen("alex", 0)).includes(h2));
     check("DIRECT=1: pasted once", count(await screen("alex", 3), h2) === 1);
+  });
+
+  await step("6. live screens: alex shares, sam doesn't; colours kept, secrets redacted", async () => {
+    // Turn sharing on for alex with --restart-bridge, back in default mode (env beats local.env).
+    const before = pidsOf("alex");
+    const out = await teamUp("alex", ["--restart-bridge", "--share-screens"], { AGENTLINK_BRIDGE_DIRECT: "0" });
+    const after = pidsOf("alex");
+    check("alex: --restart-bridge --share-screens restarts only the bridge", after.bridge !== before.bridge && after.hub === before.hub && after.daemon === before.daemon, { before, after });
+    check("alex: summary says screens are shared", out.includes("screens    shared with everyone on the hub"), out);
+    check("alex: local.env records sharing on, direct off", localEnv("alex").includes("AGENTLINK_SHARE_SCREENS=1") && localEnv("alex").includes("AGENTLINK_BRIDGE_DIRECT=0"));
+
+    const ui = await uiSocket(["alex/worker-1"]);
+    const all = await uiSocket("*");
+    try {
+      // A pane that prints a red line and some secrets, then idles (pane id and @options survive respawn).
+      const mark = `E2E-RED-${randomBytes(4).toString("hex")}`;
+      const ghp = `ghp_${randomBytes(18).toString("hex")}`; // 36 chars after the prefix
+      const script = [
+        `printf '\\033[31m${mark}\\033[0m plain tail\\n'`,
+        `printf 'AGENTLINK_TOKEN=${TOKEN}\\n'`,
+        `printf 'bare token: ${TOKEN}\\n'`,
+        `printf 'gh: ${ghp}\\n'`,
+        `exec cat > /dev/null`,
+      ].join("; ");
+      const t0 = Date.now();
+      await tmux("respawn-pane", "-k", "-t", panes.alex[1], script);
+      const hit = await until("alex/worker-1 screen with the red line", async () =>
+        screensFor(ui.frames, "alex/worker-1").find((f) => f.frame.screen.text.includes(mark)),
+      10_000);
+      const text = hit.frame.screen.text;
+      check(`screen reached the ui socket within 3s (${hit.at - t0} ms)`, hit.at - t0 <= 3_000, hit.at - t0);
+      check("colour kept: the line is wrapped in SGR red", new RegExp(`\\x1b\\[(?:[0-9;]*;)?31m${mark}`).test(text), JSON.stringify(text.slice(0, 300)));
+      check("only SGR escapes in the text", [...text.matchAll(/\x1b(\[[0-9;]*[A-Za-z]|.)/g)].every((m) => /^\x1b\[[0-9;]*m$/.test(m[0])), JSON.stringify(text.slice(0, 300)));
+      check("token value redacted (never appears)", !text.includes(TOKEN), "token found in screen text");
+      check("TOKEN= line shows [redacted]", /AGENTLINK_TOKEN=\[redacted\]/.test(text), JSON.stringify(text.slice(0, 400)));
+      check("bare token shows [redacted]", text.includes("bare token: [redacted]"), JSON.stringify(text.slice(0, 400)));
+      check("ghp_ token redacted", !text.includes(ghp), "ghp token found");
+      check("frame carries cols/rows/busy", hit.frame.screen.cols > 0 && hit.frame.screen.rows > 0 && typeof hit.frame.screen.busy === "boolean", hit.frame.screen);
+      check("subscribed socket got only alex/worker-1 screens", ui.frames.every((f) => f.frame.op !== "screen" || f.frame.address === "alex/worker-1"));
+
+      // Sam doesn't share: nothing from sam's panes, at the "*" socket or in the hub's screen list.
+      await sleep(4_000);
+      const samFrames = all.frames.filter((f) => (f.frame.op === "screen" || f.frame.op === "screen.gone") && f.frame.address.startsWith("sam/"));
+      check("sam: no screen frames at a '*' subscriber after 4s", samFrames.length === 0, samFrames.map((f) => f.frame));
+      const alexAddrs = new Set(all.frames.flatMap((f) => (f.frame.op === "screen" ? [f.frame.address] : [])));
+      check("alex: all 5 panes stream to a '*' subscriber", ["orchestrator", "worker-1", "worker-2", "worker-3", "worker-4"].every((a) => alexAddrs.has(`alex/${a}`)), [...alexAddrs]);
+      const listed = await fetch(`http://127.0.0.1:${HUB}/api/screens`, { headers: { authorization: `Bearer ${TOKEN}` } });
+      const infos = ((await listed.json()) as { screens: ScreenInfo[] }).screens;
+      check("GET /api/screens lists alex's panes and none of sam's", infos.some((s) => s.address === "alex/worker-1") && !infos.some((s) => s.address.startsWith("sam/")), infos);
+      check("GET /api/screens carries no text", infos.every((s) => !("text" in s)), infos[0]);
+
+      // Typing in the pane (on our private tmux server) changes the screen.
+      const upd = `E2E-UPDATED-${randomBytes(4).toString("hex")}`;
+      const t1 = Date.now();
+      await tmux("send-keys", "-t", panes.alex[1], "-l", upd);
+      const changed = await until("updated screen", async () =>
+        screensFor(ui.frames, "alex/worker-1").find((f) => f.at >= t1 && f.frame.screen.text.includes(upd)),
+      10_000);
+      check(`pane change shows up as a new screen (${changed.at - t1} ms)`, changed.at - t1 <= 3_000, changed.at - t1);
+
+      // A message the person at alex's UI sends to worker-2 goes straight into slot 2, as their own.
+      const body = `e2e from the UI ${randomBytes(3).toString("hex")}`;
+      const r = await api("alex", "POST", "/v1/send", { from_agent: "human", to: "alex/worker-2", type: "chat", body });
+      check("alex/human -> alex/worker-2 accepted by the daemon", r.status === 202, r);
+      await until("UI message in alex slot 2", async () => (await screen("alex", 2)).includes(body));
+      const s2 = await screen("alex", 2);
+      check("slot 2 shows '[agentlink message from you (UI)]'", s2.includes("[agentlink message from you (UI)]"), s2.slice(-400));
+      check("slot 2 shows no REMOTE banner", !/REMOTE REQUEST/.test(s2), s2.slice(-400));
+      check("not pasted into the orchestrator pane", !(await screen("alex", 0)).includes(body));
+
+      // Killing the pane ends its screen.
+      const t2 = Date.now();
+      await tmux("kill-pane", "-t", panes.alex[1]);
+      const gone = await until("screen.gone for alex/worker-1", async () =>
+        ui.frames.find((f) => f.at >= t2 && f.frame.op === "screen.gone" && f.frame.address === "alex/worker-1"),
+      20_000);
+      check(`killing the pane sends screen.gone (${gone.at - t2} ms)`, true);
+    } finally {
+      ui.close();
+      all.close();
+    }
   });
 }
 

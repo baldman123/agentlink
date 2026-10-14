@@ -6,6 +6,14 @@ import type { Store } from "./store.ts";
 import { readTeam, statusOf, type SlotView } from "./team.ts";
 import type { Tmux } from "./tmux.ts";
 
+/**
+ * c4 never clears @task. Once a worker's @state is done or idle (unset counts as idle, as in c4 status) and the
+ * Claude in the pane isn't busy, its old task line is stale: report "".
+ */
+function staleTask(s: SlotView, status: SessionStatus): boolean {
+  return (s.state === "done" || s.state === "idle" || s.state === "") && status !== "working";
+}
+
 interface Desired {
   kind: SessionKind;
   status: SessionStatus;
@@ -66,7 +74,13 @@ export class StatusSync {
     for (const s of team) {
       const status = statusOf(s);
       const task =
-        s.kind === "orchestrator" ? (workersActive ? `coordinating ${workersActive} worker${workersActive === 1 ? "" : "s"}` : "") : s.task;
+        s.kind === "orchestrator"
+          ? workersActive
+            ? `coordinating ${workersActive} worker${workersActive === 1 ? "" : "s"}`
+            : ""
+          : staleTask(s, status)
+            ? ""
+            : s.task;
       desired.set(s.agent, { kind: s.kind, status, task });
     }
 

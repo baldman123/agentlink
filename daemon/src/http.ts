@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   ADDRESS_RE,
   HOP_LIMIT,
+  SCREEN_MAX_BYTES,
   type DaemonHealth,
   type Envelope,
   type InboxItem,
@@ -176,6 +177,33 @@ export function createServer(cfg: Config, store: Store, hub: HubLink) {
     }
     if (m === "GET" && p === "/v1/peers") return proxy(res, "GET", "/api/sessions");
     if (m === "GET" && p === "/v1/messages") return proxy(res, "GET", "/api/messages" + url.search);
+
+    // ---- screens (screens.md): memory only, forwarded to the hub as {op:"screen"} ----
+    if ((match = p.match(/^\/v1\/screens\/([^/]+)$/))) {
+      const agent = decodeURIComponent(match[1]);
+      if (!AGENT_RE.test(agent)) throw new HttpError(400, "bad_agent");
+      if (m === "GET") {
+        const s = hub.getScreen(agent);
+        if (!s) throw new HttpError(404, "not_found");
+        return json(res, 200, { ...s.screen, at: s.at });
+      }
+      if (m === "DELETE") {
+        hub.deleteScreen(agent);
+        res.writeHead(204).end();
+        return;
+      }
+      if (m === "PUT") {
+        const b = (await readJson(req)) as Record<string, unknown>;
+        if (b.agent !== undefined && b.agent !== agent) throw new HttpError(400, "bad_agent", "body agent differs from the path");
+        if (typeof b.text !== "string") throw new HttpError(400, "bad_text");
+        if (Buffer.byteLength(b.text, "utf8") > SCREEN_MAX_BYTES) throw new HttpError(413, "screen_too_large", `max ${SCREEN_MAX_BYTES} bytes`);
+        const dim = (v: unknown) => Number.isInteger(v) && (v as number) > 0 && (v as number) <= 2000;
+        if (!dim(b.cols) || !dim(b.rows)) throw new HttpError(400, "bad_size", "cols and rows must be integers 1-2000");
+        hub.putScreen({ agent, text: b.text, cols: b.cols as number, rows: b.rows as number, busy: b.busy === true });
+        res.writeHead(204).end();
+        return;
+      }
+    }
 
     // ---- sessions ----
     if ((match = p.match(/^\/v1\/sessions\/([^/]+)$/))) {

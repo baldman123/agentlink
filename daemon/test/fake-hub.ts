@@ -24,6 +24,7 @@ const seen = new Set<string>();
 const pending = new Map<string, Envelope[]>(); // user -> unacked deliveries
 const sessions = new Map<string, Record<string, unknown>>();
 const context = new Map<string, ContextEntry>();
+const screens = new Map<string, { count: number; texts: string[] }>(); // address -> screen frames received
 let seq = 0;
 
 const out = (ws: WebSocket, f: ServerFrame) => ws.send(JSON.stringify(f));
@@ -45,6 +46,8 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/api/sessions") return res.end(JSON.stringify({ users: [...sessions.values()] }));
+  // test hook: every screen frame this process received, per address
+  if (url.pathname === "/api/fake-screens") return res.end(JSON.stringify(Object.fromEntries(screens)));
   if (url.pathname === "/api/messages") return res.end(JSON.stringify({ messages: [], query: url.search }));
   if (url.pathname === "/api/context") return res.end(JSON.stringify({ entries: [...context.values()] }));
   const m = url.pathname.match(/^\/api\/context\/(.+)$/);
@@ -126,6 +129,14 @@ wss.on("connection", (ws) => {
       case "session.remove":
         sessions.delete(`${user}/${f.agent}`);
         return;
+      case "screen": {
+        const address = `${user}/${f.screen.agent}`;
+        const rec = screens.get(address) ?? { count: 0, texts: [] };
+        rec.count++;
+        rec.texts.push(f.screen.text);
+        screens.set(address, rec);
+        return;
+      }
       case "heartbeat":
         flog("heartbeat", { user, agents: f.agents });
         return;

@@ -220,6 +220,78 @@ try {
   await sam.send({ op: "heartbeat", agents: ["worker"] });
   check(await alex.waitFor(isEvent("session.updated", (e) => e.session.address === "sam/worker" && e.session.status === "idle" && alex.frames.length > 0)), "heartbeat brings session back");
 
+  console.error("screens");
+  {
+    // the smoke hub times sessions out after 400ms; keep sam/worker alive until the offline check
+    let beat = setInterval(() => void sam.send({ op: "heartbeat", agents: ["worker"] }), 100);
+    const scr = (agent: string, text: string, extra: object = {}) => ({ op: "screen", screen: { agent, text, cols: 80, rows: 24, busy: false, ...extra } });
+    const isScreen = (address: string, text?: string) => (f: ServerFrame) =>
+      f.op === "screen" && f.address === address && (text === undefined || f.screen.text === text);
+    const ui2 = new Client();
+    await ui2.send({ op: "hello", token: TOKEN, role: "ui", user: "alex", protocol: PROTOCOL_VERSION });
+    await ui2.waitFor((f) => f.op === "snapshot");
+    await ui2.send({ op: "screens.subscribe", addresses: ["sam/worker"] });
+    await sam.send(scr("worker", "\u001b[32m$\u001b[0m hello"));
+    const s1 = await ui2.waitFor<Extract<ServerFrame, { op: "screen" }>>(isScreen("sam/worker", "\u001b[32m$\u001b[0m hello"));
+    check(s1 && s1.screen.cols === 80 && s1.screen.busy === false && typeof s1.at === "string", "daemon screen -> subscribed ui gets op screen");
+    await sam.send(scr("worker", "\u001b[32m$\u001b[0m hello"));
+    await sleep(100);
+    check(ui2.count(isScreen("sam/worker")) === 1, "unchanged screen is not pushed again");
+    await sam.send(scr("worker", "line 2", { busy: true }));
+    check(await ui2.waitFor((f) => isScreen("sam/worker", "line 2")(f) && (f as any).screen.busy === true), "changed screen pushed");
+
+    await alex.send(scr("ghost", "x"));
+    check(await alex.waitFor((f) => f.op === "error" && /screen rejected: no session/.test(f.message)), "screen for an agent with no session -> rejected");
+    await alex.send(scr("sam/worker", "spoof"));
+    check(await alex.waitFor((f) => f.op === "error" && /screen rejected: bad agent/.test(f.message)), "screen naming another user's agent -> rejected");
+    await sam.send(scr("worker", "x".repeat(64 * 1024 + 1)));
+    check(await sam.waitFor((f) => f.op === "error" && /screen rejected: text over/.test(f.message)), "screen over SCREEN_MAX_BYTES -> rejected");
+    await sam.send(scr("worker", "y", { cols: 0 }));
+    check(await sam.waitFor((f) => f.op === "error" && /screen rejected: bad cols/.test(f.message)), "bad cols -> rejected");
+    await sleep(50);
+    check(!ui2.frames.some((f) => f.op === "screen" && (f.screen.text === "spoof" || f.screen.text.startsWith("xxx") || f.screen.text === "y")), "rejected screens never reach the ui");
+    check([alex, sam, bob3].every((d) => d.count((f) => f.op === "screen" || f.op === "screen.gone") === 0), "daemons never get screens");
+    await sam.send({ op: "screens.subscribe", addresses: "*" });
+    check(await sam.waitFor((f) => f.op === "error" && f.code === "protocol"), "daemon screens.subscribe -> error protocol");
+
+    const ui3 = new Client();
+    await ui3.send({ op: "hello", token: TOKEN, role: "ui", user: "sam", protocol: PROTOCOL_VERSION });
+    await ui3.waitFor((f) => f.op === "snapshot");
+    await sleep(50);
+    check(ui3.count((f) => f.op === "screen") === 0, "no screens before subscribing");
+    await ui3.send({ op: "screens.subscribe", addresses: "*" });
+    check(await ui3.waitFor(isScreen("sam/worker", "line 2")), "subscribe '*' -> current screen sent immediately");
+    await ui3.send({ op: "screens.subscribe", addresses: [] });
+    await sleep(50);
+    const before = ui3.count((f) => f.op === "screen");
+    await sam.send(scr("worker", "line 3"));
+    await ui2.waitFor(isScreen("sam/worker", "line 3"));
+    await sleep(50);
+    check(ui3.count((f) => f.op === "screen") === before, "subscribe [] replaces the earlier subscription");
+    await ui3.send({ op: "screens.subscribe", addresses: ["Not An Address"] });
+    check(await ui3.waitFor((f) => f.op === "error" && f.code === "bad_frame"), "bad subscribe list -> error bad_frame");
+
+    const list = (await api("/api/screens")).body.screens;
+    check(list.length === 1 && list[0].address === "sam/worker" && list[0].cols === 80 && !("text" in list[0]), "GET /api/screens lists screens without text");
+    check((await fetch(`http://127.0.0.1:${port}/api/screens`)).status === 401, "GET /api/screens needs the token");
+
+    await sam.send({ op: "session.remove", agent: "worker" });
+    check(await ui2.waitFor((f) => f.op === "screen.gone" && f.address === "sam/worker"), "session.remove -> screen.gone");
+    check((await api("/api/screens")).body.screens.length === 0, "removed session's screen is gone from /api/screens");
+    await sam.send({ op: "session.upsert", session: { agent: "worker", kind: "worker", status: "idle", task: "" } });
+    await sam.send(scr("worker", "back"));
+    check(await ui2.waitFor(isScreen("sam/worker", "back")), "screen accepted again after re-upsert");
+    clearInterval(beat);
+    check(await ui2.waitFor((f) => f.op === "screen.gone" && f.address === "sam/worker" && ui2.count((g) => g.op === "screen.gone") === 2, 2000), "session offline (no heartbeat) -> screen.gone");
+    await sam.send(scr("worker", "while offline"));
+    check(await sam.waitFor((f) => f.op === "error" && /screen rejected: session offline/.test(f.message)), "screen for an offline session -> rejected");
+    beat = setInterval(() => void sam.send({ op: "heartbeat", agents: ["worker"] }), 100);
+    await sleep(150);
+    clearInterval(beat);
+    ui2.close();
+    ui3.close();
+  }
+
   console.error("persistence across restart");
   for (const c of [alex, sam, bob3, ui]) c.close();
   await sleep(100);

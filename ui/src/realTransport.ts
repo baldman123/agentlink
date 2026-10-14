@@ -1,6 +1,7 @@
 import { PROTOCOL_VERSION } from "../../contracts/index.ts";
-import type { ClientFrame, ContextEntry, ServerFrame, StoredMessage, UiBootstrap } from "../../contracts/index.ts";
+import type { Address, ClientFrame, ContextEntry, ServerFrame, StoredMessage, UiBootstrap } from "../../contracts/index.ts";
 import type { ConnectHandlers, ContextPutResult, MessageQuery, Transport } from "./lib.ts";
+import { screenStore } from "./screens.ts";
 
 const PING_MS = 15_000;
 
@@ -22,6 +23,16 @@ export function realTransport(daemonPort: number): Transport {
     if (!r.ok) throw new Error(`hub answered ${r.status}`);
     return (await r.json()) as T;
   }
+
+  // live-screen subscription; replayed on every (re)connect
+  let liveSock: WebSocket | null = null;
+  let screenSubs: Address[] = [];
+  const sendSubs = () => {
+    if (liveSock?.readyState !== 1) return;
+    const frame: ClientFrame = { op: "screens.subscribe", addresses: screenSubs };
+    liveSock.send(JSON.stringify(frame));
+    screenStore.resetGrace();
+  };
 
   function connect(h: ConnectHandlers, sinceSeq: () => number | undefined) {
     let ws: WebSocket | null = null;
@@ -83,10 +94,13 @@ export function realTransport(daemonPort: number): Transport {
           attempt = 0;
           h.onState("connected");
           pingTimer = window.setInterval(() => sock.readyState === 1 && sock.send(JSON.stringify({ op: "ping" })), PING_MS);
+          liveSock = sock;
+          if (screenSubs.length) sendSubs();
         }
         h.onFrame(f);
       };
       sock.onclose = (ev) => {
+        if (liveSock === sock) liveSock = null;
         if (ws !== sock) return;
         ws = null;
         if (disposed) return;
@@ -141,6 +155,13 @@ export function realTransport(daemonPort: number): Transport {
       if (r.status === 503) return { ok: false, error: "Hub is offline. Your edit is still here; save again once it reconnects." };
       if (!r.ok) return { ok: false, error: j.detail || j.error || `Save failed (${r.status})` };
       return { ok: true, entry: j as ContextEntry };
+    },
+    subscribeScreens(addresses) {
+      const next = [...new Set(addresses)].sort();
+      if (next.join() === screenSubs.join()) return;
+      screenSubs = next;
+      screenStore.subscribed(next);
+      sendSubs();
     },
   };
 }

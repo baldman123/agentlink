@@ -1,4 +1,4 @@
-import type { InboxItem, Session, SessionKind, SessionStatus } from "../../contracts/index.ts";
+import type { InboxItem, ScreenUpdate, Session, SessionKind, SessionStatus } from "../../contracts/index.ts";
 
 /** The few daemon localhost endpoints the bridge needs (contracts/daemon-api.md). */
 export class Daemon {
@@ -26,6 +26,14 @@ export class Daemon {
 
   async deleteSession(agent: string): Promise<void> {
     await this.req("DELETE", `/v1/sessions/${encodeURIComponent(agent)}`);
+  }
+
+  async putScreen(update: ScreenUpdate): Promise<void> {
+    await this.req("PUT", `/v1/screens/${encodeURIComponent(update.agent)}`, update);
+  }
+
+  async deleteScreen(agent: string): Promise<void> {
+    await this.req("DELETE", `/v1/screens/${encodeURIComponent(agent)}`);
   }
 
   async unhandledInbox(): Promise<InboxItem[]> {

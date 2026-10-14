@@ -2,7 +2,7 @@ import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { HUMAN_AGENT, type InboxItem } from "../../contracts/index.ts";
 import { renderPaste, shortId } from "../../orchestrator/src/paste.ts";
-import { bodyToText } from "../../orchestrator/src/trust.ts";
+import { bodyToText, isUntrusted } from "../../orchestrator/src/trust.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { Daemon } from "./daemon.ts";
 import { log, logMsg } from "./log.ts";
@@ -11,6 +11,12 @@ import { readTeam, type SlotView } from "./team.ts";
 import { sanitizeForPaste, sleep, type Tmux } from "./tmux.ts";
 
 const SKIP_TYPES = new Set(["context_update", "status"]); // shown in the UI; never pasted
+
+/** What the local person typed in the UI: their own words, so no REMOTE banner or fence. */
+export function renderLocalHuman(item: InboxItem): string {
+  const id8 = shortId(item.envelope.id);
+  return `[agentlink message from you (UI)]\n${bodyToText(item.envelope.body)}\nReply:   agentlink reply ${id8} "<text>"`;
+}
 
 /**
  * Inbound: daemon inbox → tmux. Catch up with GET /v1/inbox on start and after every stream drop, follow
@@ -123,9 +129,17 @@ export class Inbound {
     }
   }
 
-  private target(team: SlotView[], to: string): SlotView | null {
+  /**
+   * Trusted local input: the person at this laptop's UI (<user>/human, not a relayed remote request).
+   * It goes straight to the worker it names, DIRECT or not.
+   */
+  private fromLocalHuman(item: InboxItem): boolean {
+    return item.envelope.from === `${this.cfg.user}/${HUMAN_AGENT}` && !isUntrusted(item);
+  }
+
+  private target(team: SlotView[], to: string, localHuman: boolean): SlotView | null {
     const orch = team.find((s) => s.kind === "orchestrator") ?? null;
-    if (this.cfg.direct) {
+    if (this.cfg.direct || localHuman) {
       const m = to.match(/^([a-z0-9_-]+)\/(worker-[1-4])$/);
       if (m && m[1] === this.cfg.user) {
         const worker = team.find((s) => s.agent === m[2]);
@@ -138,12 +152,13 @@ export class Inbound {
   private async pasteOne(item: InboxItem): Promise<boolean> {
     const e = item.envelope;
     const team = await readTeam(this.tmux, this.cfg.stateDir);
-    const slot = this.target(team, e.to);
+    const localHuman = this.fromLocalHuman(item);
+    const slot = this.target(team, e.to, localHuman);
     if (!slot) {
       logMsg("msg.waiting", e, { reason: "no_target_pane" });
       return false;
     }
-    const text = sanitizeForPaste(renderPaste(item, this.cfg.user));
+    const text = sanitizeForPaste(localHuman ? renderLocalHuman(item) : renderPaste(item, this.cfg.user));
     const ok = await this.tmux.paste(slot.pane, text, `agentlink-${shortId(e.id)}`, () =>
       logMsg("msg.paste_waiting", e, { slot: slot.slot, reason: "yes/no prompt on screen" }),
     );
@@ -152,7 +167,7 @@ export class Inbound {
       return false;
     }
     this.store.mark(e.id, "pasted");
-    logMsg("msg.pasted", e, { slot: slot.slot, pane: slot.pane, agent: slot.agent, remote: item.remote });
+    logMsg("msg.pasted", e, { slot: slot.slot, pane: slot.pane, agent: slot.agent, remote: item.remote, local_human: localHuman });
     this.boardLine(item);
     this.afterPaste();
     return true;

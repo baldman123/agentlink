@@ -10,6 +10,8 @@ import { ChatView } from "./components/ChatView.tsx";
 import { ActivityStrip, Header, Switcher, Toasts } from "./components/Chrome.tsx";
 import { Sidebar, type Tab } from "./components/Sidebar.tsx";
 import { TeamView } from "./components/TeamView.tsx";
+import { TerminalsView } from "./components/TerminalsView.tsx";
+import { screenStore } from "./screens.ts";
 
 export function App() {
   const transport = useMemo(() => (MOCK ? mockTransport(DAEMON_PORT) : realTransport(DAEMON_PORT)), []);
@@ -33,9 +35,11 @@ export function App() {
   const [contextFocus, setContextFocus] = useState<AppCtx["contextFocus"]>(null);
   const [switcher, setSwitcher] = useState(false);
   const [view, setView] = useState<AppCtx["view"]>(() => {
+    const ok = (v: unknown): v is AppCtx["view"] => v === "chat" || v === "team" || v === "terminals";
     const q = params.get("view");
-    if (q === "team" || q === "chat") return q;
-    return safeStorage<AppCtx["view"]>("al.view", "chat") === "team" ? "team" : "chat";
+    if (ok(q)) return q;
+    const saved = safeStorage<unknown>("al.view", "chat");
+    return ok(saved) ? saved : "chat";
   });
   useEffect(() => saveStorage("al.view", view), [view]);
 
@@ -51,7 +55,12 @@ export function App() {
         if (cancelled) return;
         stop = transport.connect(
           {
-            onFrame: (frame) => dispatch({ type: "frame", frame }),
+            onFrame: (frame) => {
+              // live screens bypass the reducer (see screens.ts)
+              if (frame.op === "screen") screenStore.put(frame.address, frame.screen, frame.at);
+              else if (frame.op === "screen.gone") screenStore.gone(frame.address);
+              else dispatch({ type: "frame", frame });
+            },
             onState: (s, detail) => dispatch({ type: "conn", state: s, detail }),
           },
           () => seqRef.current,
@@ -105,13 +114,13 @@ export function App() {
 
   return (
     <Ctx.Provider value={ctx}>
-      <div className="app" style={{ "--left": `${leftW}px`, "--right": `${rightW}px` } as React.CSSProperties}>
+      <div className={`app view-${view}`} style={{ "--left": `${leftW}px`, "--right": `${rightW}px` } as React.CSSProperties}>
         <Header theme={theme} toggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")} />
         <ActivityStrip />
         <main className="cols">
           <ChatList />
           <Resizer side="left" width={leftW} setWidth={setLeftW} min={200} max={380} />
-          {view === "team" ? <TeamView /> : <ChatView />}
+          {view === "team" ? <TeamView /> : view === "terminals" ? <TerminalsView /> : <ChatView />}
           <Resizer side="right" width={rightW} setWidth={setRightW} min={280} max={560} />
           <Sidebar tab={tab} setTab={setTab} feed={feed} setFeed={setFeed} />
         </main>

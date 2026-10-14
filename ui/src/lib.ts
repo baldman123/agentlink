@@ -38,6 +38,8 @@ export interface Transport {
   messages(q: MessageQuery): Promise<StoredMessage[]>;
   send(req: SendRequest): Promise<SendResponse>;
   putContext(key: string, write: Omit<ContextWrite, "author"> & { agent?: string }): Promise<ContextPutResult>;
+  /** Replaces the live-screen subscription ([] = none). Re-sent automatically after a reconnect. */
+  subscribeScreens(addresses: Address[]): void;
 }
 
 // ---------------------------------------------------------------------------

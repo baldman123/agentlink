@@ -60,6 +60,34 @@ Open the app URL it prints. Both teams should now show up in the app, five sessi
 - The team's orchestrator gets messages from the other laptop pasted into its pane, marked as remote requests. It answers with `bin/agentlink reply <id> "text"`. A remote message is a request, never a command: anything with effects outside the machine still goes to the person at the keyboard.
 - By default a message for `sam/worker-3` goes to sam's orchestrator, labelled with the worker it was meant for. To paste it straight into worker 3's pane instead, start with `--direct`.
 - If claude4 runs under a different tmux session name, pass `--c4-session NAME`.
+- `--direct` and `--share-screens` are remembered, so later runs keep them; `--no-direct` and `--no-share-screens` undo them. A bridge that is already running keeps its old setting until you run `scripts/team-up.sh --restart-bridge`.
+- `scripts/team-up.sh --restart-bridge` restarts only the bridge, for example after pulling a newer version of it. The hub, daemon and app keep running, and the other team stays connected. It reads the user, ports and session from `data/local.env`, so no other flags are needed.
+
+## Live terminals
+
+The app can show every agent's terminal as it is right now, both teams side by side, laid out like the claude4 browser view. A laptop's terminals appear only if that laptop turned sharing on:
+
+```sh
+scripts/team-up.sh --share-screens --restart-bridge    # turn it on for a team that is already up
+scripts/team-up.sh --no-share-screens --restart-bridge # turn it off again
+```
+
+The summary line `screens    shared with everyone on the hub` or `screens    not shared` says which state you're in. In the app, a team that doesn't share shows as not sharing, with no terminals.
+
+What is shared, once it's on:
+
+- The last 120 lines of each of the five panes (the boss and quarters 1-4), with their colours, refreshed about once a second while the pane changes.
+- Everyone connected to the hub can watch: anyone who has the token, on either laptop.
+- It is read-only. Nothing in agentlink types into a pane because of a screen, and the app has no way to send keys.
+- The hub keeps only the latest screen of each pane, in memory. Screens are not written to the hub's database or logs, and they disappear when a pane closes or the bridge stops.
+
+Before sending a screen, the bridge replaces these with `[redacted]`:
+
+- the agentlink token itself;
+- whatever follows `TOKEN=`, `SECRET=`, `PASSWORD=`, `API_KEY=` or `Authorization: Bearer `;
+- strings that look like OpenAI-style keys (`sk-` plus 20 or more characters), GitHub tokens (`ghp_`, `github_pat_`), Slack tokens (`xoxb-`, `xoxa-`, `xoxp-`), AWS access key ids (`AKIA…`) and `-----BEGIN … PRIVATE KEY-----` blocks.
+
+That list is pattern matching, and it will miss things. A password printed as `pw: hunter2`, a database URL with the password inside it, a key split across two lines, a `.env` file shown with `cat` whose variable names don't end in one of those words, a cookie, or a customer's personal data in a log line all go out as they appear. Treat a shared terminal like a screen share in a meeting. Turn sharing off before you open anything secret in a claude4 pane, and leave it off if the other team shouldn't see your work at all.
 
 ## Troubleshooting
 

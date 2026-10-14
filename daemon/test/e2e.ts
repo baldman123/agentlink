@@ -1,17 +1,19 @@
 // End-to-end daemon test: a hub + two daemons (alex, sam) on test ports with throwaway DBs.
 //   npm run test:e2e                      -> uses test/fake-hub.ts
 //   HUB=real npm run test:e2e             -> starts ../hub (npm start) instead
-// Ports: hub 7790, alex 7791, sam 7792 (so it never collides with a dev setup on 7700-7702).
+// Ports: hub E2E_BASE (default 7790), alex +1, sam +2 (so it never collides with a dev setup on 7700-7702).
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { pathToFileURL } from "node:url";
+import WebSocket from "ws";
+import type { ServerFrame } from "../../contracts/index.ts";
 
 const TOKEN = "e2e-test-token";
-const HUB_PORT = 7790;
-const PORTS = { alex: 7791, sam: 7792 } as const;
+const HUB_PORT = Number(process.env.E2E_BASE ?? 7790);
+const PORTS = { alex: HUB_PORT + 1, sam: HUB_PORT + 2 } as const;
 type User = keyof typeof PORTS;
 const REAL = process.env.HUB === "real";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlink-e2e-"));
@@ -100,6 +102,42 @@ async function until<T>(what: string, fn: () => Promise<T | undefined | null | f
 const health = (u: User) => api(u, "GET", "/v1/health").then((r) => r.body);
 const connected = (u: User) => until(`${u} connected`, async () => (await health(u)).hub.state === "connected");
 const inbox = (u: User, q = "") => api(u, "GET", `/v1/inbox${q}`).then((r) => r.body.messages as any[]);
+
+/** Hub REST with the test token. */
+async function hubApi(p: string): Promise<any> {
+  const res = await fetch(`http://127.0.0.1:${HUB_PORT}${p}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  return res.json();
+}
+
+/** A role=ui hub socket (real hub only), collecting server frames. */
+class UiSock {
+  frames: ServerFrame[] = [];
+  private constructor(private ws: WebSocket) {
+    ws.on("message", (d) => this.frames.push(JSON.parse(d.toString())));
+  }
+  static async open(): Promise<UiSock> {
+    const ws = new WebSocket(`ws://127.0.0.1:${HUB_PORT}/ws`);
+    const sock = new UiSock(ws);
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => {
+        ws.send(JSON.stringify({ op: "hello", token: TOKEN, role: "ui", user: "e2e-ui", protocol: 1 }));
+        resolve();
+      });
+      ws.once("error", reject);
+    });
+    await sock.wait((f) => f.op === "snapshot");
+    return sock;
+  }
+  send(f: unknown) {
+    this.ws.send(JSON.stringify(f));
+  }
+  wait<T extends ServerFrame>(pred: (f: any) => boolean, ms = 10_000): Promise<T | null> {
+    return until("ui frame", async () => (this.frames.find(pred) as T | undefined) ?? null, ms).catch(() => null);
+  }
+  close() {
+    this.ws.close();
+  }
+}
 
 async function main() {
   console.log(`tmp dir: ${tmp}  hub: ${REAL ? "real" : "fake"}`);
@@ -220,6 +258,73 @@ async function main() {
   const all = await inbox("sam", "?limit=1000");
   const ids = all.map((m) => m.envelope.id);
   check("inbox dedupe", ids.length === new Set(ids).size, ids);
+
+  // --- screens (screens.md): local API, forwarding, latest-only while offline, never queued
+  {
+    const scr = (text: string, extra: object = {}) => ({ agent: "worker-1", text, cols: 80, rows: 24, busy: false, ...extra });
+    await api("alex", "PUT", "/v1/sessions/worker-1", { kind: "worker", status: "working", task: "" });
+    let ui: UiSock | null = null;
+    if (REAL) {
+      ui = await UiSock.open();
+      ui.send({ op: "screens.subscribe", addresses: ["alex/worker-1"] });
+    }
+    const put1 = await api("alex", "PUT", "/v1/screens/worker-1", scr("\u001b[32mone\u001b[0m", { busy: true }));
+    check("PUT /v1/screens/:agent -> 204", put1.status === 204, put1);
+    const got = await api("alex", "GET", "/v1/screens/worker-1");
+    check("GET /v1/screens/:agent returns the latest", got.status === 200 && got.body.text === "\u001b[32mone\u001b[0m" && got.body.busy === true && typeof got.body.at === "string", got.body);
+    check("GET unknown screen -> 404", (await api("alex", "GET", "/v1/screens/worker-9")).status === 404);
+    check("oversized screen -> 413", (await api("alex", "PUT", "/v1/screens/worker-1", scr("x".repeat(64 * 1024 + 1)))).status === 413);
+    check("bad cols -> 400", (await api("alex", "PUT", "/v1/screens/worker-1", scr("x", { cols: 0 }))).status === 400);
+    check("body agent differing from path -> 400", (await api("alex", "PUT", "/v1/screens/worker-1", { ...scr("x"), agent: "worker-2" })).status === 400);
+    const cors = await api("alex", "PUT", "/v1/screens/worker-1", scr("two"), { origin: "http://evil.example" });
+    check("screens API refuses foreign origins (403)", cors.status === 403);
+    await api("alex", "PUT", "/v1/screens/worker-1", scr("two"));
+    if (REAL) {
+      check("hub pushes the screen to a subscribed ui", !!(await ui!.wait((f) => f.op === "screen" && f.address === "alex/worker-1" && f.screen.text === "two")));
+    } else {
+      const seen = await until("fake hub got screen", async () => {
+        const rec = (await hubApi("/api/fake-screens"))["alex/worker-1"];
+        return rec?.texts.includes("two") ? rec : null;
+      });
+      check("daemon forwards {op:screen} while connected", seen.texts.at(-1) === "two", seen);
+    }
+
+    // hub down: only the latest screen per agent survives, nothing is queued
+    await stop(hub);
+    ui?.close();
+    await until("alex disconnected", async () => (await health("alex")).hub.state !== "connected");
+    for (const t of ["three", "four", "five"]) await api("alex", "PUT", "/v1/screens/worker-1", scr(t));
+    check("screens are not queued in the outbox", (await health("alex")).outbox_depth === 0);
+    const dbBytes = fs.readFileSync(path.join(tmp, "daemon-alex.sqlite"));
+    const wal = path.join(tmp, "daemon-alex.sqlite-wal");
+    const walBytes = fs.existsSync(wal) ? fs.readFileSync(wal) : Buffer.alloc(0);
+    check("screens are not written to SQLite", !dbBytes.includes("five") && !walBytes.includes("five"));
+    hub = startHub();
+    await connected("alex");
+    if (REAL) {
+      ui = await UiSock.open();
+      ui.send({ op: "screens.subscribe", addresses: ["alex/worker-1"] });
+      const s = await ui.wait<Extract<ServerFrame, { op: "screen" }>>((f) => f.op === "screen" && f.address === "alex/worker-1");
+      check("after reconnect the hub has the latest screen", s?.screen.text === "five", s);
+    } else {
+      const rec = await until("fake hub got resent screen", async () => (await hubApi("/api/fake-screens"))["alex/worker-1"] ?? null);
+      await new Promise((r) => setTimeout(r, 500));
+      const rec2 = (await hubApi("/api/fake-screens"))["alex/worker-1"];
+      check("on reconnect only the latest screen is sent (once)", rec2.count === 1 && rec2.texts[0] === "five", { rec, rec2 });
+    }
+
+    const del = await api("alex", "DELETE", "/v1/screens/worker-1");
+    check("DELETE /v1/screens/:agent -> 204, then GET 404", del.status === 204 && (await api("alex", "GET", "/v1/screens/worker-1")).status === 404);
+    if (REAL) {
+      await api("alex", "PUT", "/v1/screens/worker-1", scr("six"));
+      await ui!.wait((f) => f.op === "screen" && f.address === "alex/worker-1" && f.screen.text === "six");
+      await api("alex", "DELETE", "/v1/sessions/worker-1");
+      check("removing the session -> screen.gone at the ui", !!(await ui!.wait((f) => f.op === "screen.gone" && f.address === "alex/worker-1")));
+      ui!.close();
+    } else {
+      await api("alex", "DELETE", "/v1/sessions/worker-1");
+    }
+  }
 
   // rejection note is logged (fake hub only; it's the one with the reject hook)
   if (!REAL) {

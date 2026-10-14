@@ -14,7 +14,9 @@ import type {
   StoredMessage,
   UserPresence,
 } from "../../../contracts/index.ts";
-import { involves, userOf, type ConnectHandlers, type Transport } from "../lib.ts";
+import { involves, params, userOf, type ConnectHandlers, type Transport } from "../lib.ts";
+import { screenStore } from "../screens.ts";
+import { makeScreenSim } from "./screens.ts";
 
 const iso = (msAgo = 0) => new Date(Date.now() - msAgo).toISOString();
 const uuid = () => crypto.randomUUID();
@@ -254,8 +256,24 @@ export function mockTransport(daemonPort: number): Transport {
       handlers?.onState("reconnecting", "hub connection lost");
       setTimeout(() => open(true), ms);
     },
+    /** current live-screen subscription (for tests) */
+    screenSubs: () => [...screenSubs],
   };
-  (window as unknown as { __mock: typeof api }).__mock = api;
+
+  // live screens: every subscribed address of a sharing user gets a new screen about once a second.
+  // ?mockshare=alex limits sharing to those users (to see the "screen not shared" frames).
+  const shareParam = params.get("mockshare");
+  const sharing = new Set(shareParam ? shareParam.split(",") : [...users.keys()]);
+  const findSession = (a: string) => users.get(userOf(a))?.sessions.find((s) => s.address === a);
+  const sim = makeScreenSim(findSession);
+  let screenSubs: string[] = [];
+  const pushScreen = (a: string, fresh: boolean) => {
+    if (!connected || !handlers || !sharing.has(userOf(a)) || !findSession(a)) return;
+    handlers.onFrame({ op: "screen", address: a, screen: fresh ? sim.render(a) : sim.tick(a), at: iso() });
+  };
+  window.setInterval(() => {
+    for (const a of screenSubs) pushScreen(a, false);
+  }, 1000);
 
   let sinceFn: () => number | undefined = () => undefined;
   function open(re: boolean) {
@@ -269,6 +287,10 @@ export function mockTransport(daemonPort: number): Transport {
       h.onFrame(snapshot());
       const since = sinceFn();
       if (since != null) for (const f of log) if (f.seq > since) h.onFrame({ op: "event", frame: f });
+      if (screenSubs.length) {
+        screenStore.resetGrace();
+        for (const a of screenSubs) pushScreen(a, true);
+      }
     }, re ? 300 : 600);
   }
 
@@ -278,6 +300,8 @@ export function mockTransport(daemonPort: number): Transport {
       return { user: me, hub_http: "http://mock-hub:7700", hub_ws: "ws://mock-hub:7700/ws", token: "mock", daemon: `http://127.0.0.1:${daemonPort}` };
     },
     connect(h, since) {
+      // StrictMode may build two transports; the test hook belongs to the one that actually connects
+      (window as unknown as { __mock: typeof api }).__mock = api;
       handlers = h;
       sinceFn = since;
       open(false);
@@ -312,6 +336,15 @@ export function mockTransport(daemonPort: number): Transport {
         }, 1400);
       }
       return { id: m.id, queued: true as const };
+    },
+    subscribeScreens(addresses) {
+      const next = [...new Set(addresses)].sort();
+      if (next.join() === screenSubs.join()) return;
+      const added = next.filter((a) => !screenSubs.includes(a));
+      screenSubs = next;
+      screenStore.subscribed(next);
+      // like the hub: the current screen of each newly subscribed address right away
+      setTimeout(() => added.forEach((a) => pushScreen(a, true)), 120);
     },
     async putContext(key, w) {
       await new Promise((r) => setTimeout(r, 250));

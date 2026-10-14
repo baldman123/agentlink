@@ -1,8 +1,9 @@
 // agentlink ↔ claude4 bridge (contracts/bridge.md). One per laptop, next to the daemon.
-import { loadConfig } from "./config.ts";
+import { loadConfig, loadToken } from "./config.ts";
 import { Daemon } from "./daemon.ts";
 import { Inbound } from "./inbound.ts";
 import { initLog, log } from "./log.ts";
+import { ScreenShare } from "./screens.ts";
 import { Store } from "./store.ts";
 import { StatusSync } from "./sync.ts";
 import { Tmux } from "./tmux.ts";
@@ -22,12 +23,17 @@ log("bridge.started", {
   state_dir: cfg.stateDir,
   tmux_socket: cfg.tmuxSocket,
   direct: cfg.direct,
+  share_screens: cfg.shareScreens,
   db: cfg.dbPath,
   first_run: store.firstRun,
 });
 
 sync.start();
 inbound.start();
+
+// Opt-in only (contracts/screens.md). Without AGENTLINK_SHARE_SCREENS=1 no screen ever leaves this laptop.
+const screens = cfg.shareScreens ? new ScreenShare(cfg, tmux, daemon, () => sync.team, loadToken()) : null;
+screens?.start();
 
 let stopping = false;
 async function shutdown(sig: string) {
@@ -36,6 +42,7 @@ async function shutdown(sig: string) {
   log("bridge.stopping", { signal: sig });
   inbound.stop();
   sync.stop();
+  await Promise.race([screens?.stop(), new Promise((r) => setTimeout(r, 1_000))]);
   await Promise.race([sync.markOffline(), new Promise((r) => setTimeout(r, 2_000))]);
   process.exit(0);
 }

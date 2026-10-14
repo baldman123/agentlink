@@ -9,6 +9,7 @@ import {
   type Envelope,
   type HubConnState,
   type InboxItem,
+  type ScreenUpdate,
   type ServerFrame,
 } from "../../contracts/index.ts";
 import type { Config } from "./config.ts";
@@ -48,6 +49,9 @@ export class HubLink extends EventEmitter {
   private stopped = false;
   private connecting = false;
   private idMismatch = false; // offline because the hub's id differs from the pinned one
+  // Latest terminal screen per local agent. Memory only, never the outbox or SQLite (screens.md):
+  // forwarded while connected; while offline only the latest survives, resent on reconnect.
+  private screens = new Map<string, { screen: ScreenUpdate; at: string }>();
 
   constructor(
     private cfg: Config,
@@ -319,6 +323,8 @@ export class HubLink extends EventEmitter {
     for (const s of this.store.sessions()) {
       this.write({ op: "session.upsert", session: { agent: s.agent, kind: s.kind, status: s.status, task: s.task } });
     }
+    // after the upserts: the hub only takes screens for sessions that exist and are online
+    for (const { screen } of this.screens.values()) this.write({ op: "screen", screen });
     this.pump(true);
 
     this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
@@ -420,7 +426,24 @@ export class HubLink extends EventEmitter {
   }
 
   forwardRemove(agent: string) {
+    this.screens.delete(agent);
     this.write({ op: "session.remove", agent });
+  }
+
+  // ------------------------------------------------------------------ screens
+
+  putScreen(screen: ScreenUpdate) {
+    this.screens.set(screen.agent, { screen, at: new Date().toISOString() });
+    if (this.connected) this.write({ op: "screen", screen });
+  }
+
+  getScreen(agent: string) {
+    return this.screens.get(agent) ?? null;
+  }
+
+  /** Local only: the hub drops a screen when its session goes offline or is removed. */
+  deleteScreen(agent: string) {
+    this.screens.delete(agent);
   }
 
   // ------------------------------------------------------------------ REST proxy

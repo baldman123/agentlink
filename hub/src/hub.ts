@@ -5,6 +5,7 @@ import {
   ADDRESS_RE,
   HOP_LIMIT,
   PROTOCOL_VERSION,
+  SCREEN_MAX_BYTES,
   SESSION_TIMEOUT_MS,
   type ClientFrame,
   type ClientRole,
@@ -14,6 +15,8 @@ import {
   type EventFrame,
   type HubEvent,
   type MessageType,
+  type ScreenInfo,
+  type ScreenUpdate,
   type ServerFrame,
   type SessionKind,
   type SessionStatus,
@@ -42,6 +45,14 @@ interface Conn {
   user?: string;
   ip?: string;
   lastSeen: number;
+  screenSubs?: Set<string> | "*"; // ui only: addresses whose screens this socket gets
+}
+
+const SCREEN_MAX_DIM = 2000; // cols/rows sanity bound
+const SCREEN_MAX_SUBS = 500;
+interface StoredScreen {
+  screen: ScreenUpdate;
+  at: string;
 }
 
 const PART_RE = /^[a-z0-9_-]{1,32}$/;
@@ -63,6 +74,9 @@ export class Hub {
   private daemons = new Map<string, Conn>();
   private seq: number;
   private sweepTimer?: NodeJS.Timeout;
+  // Latest terminal screen per address. Memory only: never in SQLite or the event log (screens.md).
+  private screens = new Map<string, StoredScreen>();
+  private screenRejectLogged = new Map<string, number>();
 
   constructor(readonly opts: HubOptions) {
     this.db = new HubDb(opts.dbPath);
@@ -101,6 +115,9 @@ export class Hub {
     const frame: EventFrame = { seq: ++this.seq, at: new Date().toISOString(), event };
     this.db.insertEvent(frame.seq, frame.at, event);
     for (const c of this.conns) if (c.authed) this.sendFrame(c, { op: "event", frame });
+    // Every path that takes a session offline or removes it ends up here, so screens are dropped here.
+    if (event.type === "session.updated" && event.session.status === "offline") this.dropScreen(event.session.address);
+    if (event.type === "session.removed") this.dropScreen(event.address);
     return frame;
   }
 
@@ -165,6 +182,10 @@ export class Hub {
     }
     if (f.op === "ping") return this.sendFrame(conn, { op: "pong" });
     if (f.op === "hello") return this.sendFrame(conn, { op: "error", code: "protocol", message: "already said hello" });
+    if (f.op === "screens.subscribe") {
+      if (conn.role !== "ui") return this.sendFrame(conn, { op: "error", code: "protocol", message: "screens.subscribe is for ui sockets" });
+      return this.onScreensSubscribe(conn, f.addresses);
+    }
     if (conn.role !== "daemon") {
       return this.sendFrame(conn, { op: "error", code: "protocol", message: `op ${f.op} not allowed for role ${conn.role}` });
     }
@@ -183,6 +204,8 @@ export class Hub {
       }
       case "heartbeat":
         return this.onHeartbeat(user, f.agents);
+      case "screen":
+        return this.onScreen(conn, f.screen);
       default:
         this.sendFrame(conn, { op: "error", code: "bad_frame", message: `unknown op ${(f as any).op}` });
     }
@@ -365,6 +388,67 @@ export class Hub {
     }
   }
 
+  // ----------------------------------------------------------------- screens
+  private onScreen(conn: Conn, s: any): void {
+    const user = conn.user!;
+    const reject = (why: string) => {
+      // a bridge may retry twice a second; log each (user, agent, reason) at most once a minute
+      const agent = typeof s?.agent === "string" ? s.agent.slice(0, 64) : null;
+      const key = `${user}|${agent}|${why}`;
+      const now = Date.now();
+      if ((this.screenRejectLogged.get(key) ?? 0) < now - 60_000) {
+        this.screenRejectLogged.set(key, now);
+        if (this.screenRejectLogged.size > 1000) this.screenRejectLogged.clear();
+        logInfo("screen.rejected", { user, agent, why });
+      }
+      this.sendFrame(conn, { op: "error", code: "bad_frame", message: `screen rejected: ${why}` });
+    };
+    // PART_RE has no "/", so the agent can only ever name a session of this daemon's own user.
+    if (!s || typeof s !== "object" || typeof s.agent !== "string" || !PART_RE.test(s.agent)) return reject("bad agent");
+    if (typeof s.text !== "string") return reject("bad text");
+    if (Buffer.byteLength(s.text, "utf8") > SCREEN_MAX_BYTES) return reject(`text over ${SCREEN_MAX_BYTES} bytes`);
+    const dim = (v: unknown) => Number.isInteger(v) && (v as number) > 0 && (v as number) <= SCREEN_MAX_DIM;
+    if (!dim(s.cols) || !dim(s.rows)) return reject("bad cols/rows");
+    const address = `${user}/${s.agent}`;
+    const session = this.db.getSession(address);
+    if (!session) return reject("no session");
+    if (session.offline) return reject("session offline");
+
+    const screen: ScreenUpdate = { agent: s.agent, text: s.text, cols: s.cols, rows: s.rows, busy: s.busy === true };
+    const prev = this.screens.get(address)?.screen;
+    if (prev && prev.text === screen.text && prev.cols === screen.cols && prev.rows === screen.rows && prev.busy === screen.busy) return;
+    const stored: StoredScreen = { screen, at: new Date().toISOString() };
+    this.screens.set(address, stored);
+    for (const c of this.conns) if (this.wantsScreen(c, address)) this.sendFrame(c, { op: "screen", address, ...stored });
+  }
+
+  private onScreensSubscribe(conn: Conn, addresses: unknown): void {
+    if (addresses === "*") {
+      conn.screenSubs = "*";
+    } else if (Array.isArray(addresses) && addresses.length <= SCREEN_MAX_SUBS && addresses.every(isAgentAddress)) {
+      conn.screenSubs = new Set(addresses);
+    } else {
+      return this.sendFrame(conn, { op: "error", code: "bad_frame", message: `addresses must be "*" or up to ${SCREEN_MAX_SUBS} user/agent addresses` });
+    }
+    for (const [address, stored] of this.screens) {
+      if (this.wantsScreen(conn, address)) this.sendFrame(conn, { op: "screen", address, ...stored });
+    }
+  }
+
+  private wantsScreen(c: Conn, address: string): boolean {
+    if (!c.authed || c.role !== "ui" || !c.screenSubs) return false; // daemons never get screens
+    return c.screenSubs === "*" || c.screenSubs.has(address);
+  }
+
+  private dropScreen(address: string): void {
+    if (!this.screens.delete(address)) return;
+    for (const c of this.conns) if (this.wantsScreen(c, address)) this.sendFrame(c, { op: "screen.gone", address });
+  }
+
+  screenInfos(): ScreenInfo[] {
+    return [...this.screens].map(([address, { screen, at }]) => ({ address, cols: screen.cols, rows: screen.rows, at }));
+  }
+
   private sweep(): void {
     const now = Date.now();
     const timeout = this.opts.sessionTimeoutMs ?? SESSION_TIMEOUT_MS;
@@ -453,6 +537,7 @@ export class Hub {
       const q = url.searchParams;
       let m: RegExpMatchArray | null;
       if (path === "/api/sessions" && req.method === "GET") return send(200, { users: this.presence() });
+      if (path === "/api/screens" && req.method === "GET") return send(200, { screens: this.screenInfos() });
       if (path === "/api/messages" && req.method === "GET") {
         const limit = clampInt(q.get("limit"), 50, 1, 500);
         return send(200, {
