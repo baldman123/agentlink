@@ -1,0 +1,146 @@
+import { PROTOCOL_VERSION } from "../../contracts/index.ts";
+import type { ClientFrame, ContextEntry, ServerFrame, StoredMessage, UiBootstrap } from "../../contracts/index.ts";
+import type { ConnectHandlers, ContextPutResult, MessageQuery, Transport } from "./lib.ts";
+
+const PING_MS = 15_000;
+
+export function realTransport(daemonPort: number): Transport {
+  const daemon = `http://127.0.0.1:${daemonPort}`;
+  let boot: UiBootstrap | null = null;
+
+  async function bootstrap(): Promise<UiBootstrap> {
+    const r = await fetch(`${daemon}/v1/ui-bootstrap`);
+    if (!r.ok) throw new Error(`daemon answered ${r.status}`);
+    boot = (await r.json()) as UiBootstrap;
+    return boot;
+  }
+
+  async function hubGet<T>(path: string): Promise<T> {
+    const b = boot ?? (await bootstrap());
+    if (!b.hub_http) throw new Error("hub not found yet");
+    const r = await fetch(`${b.hub_http}${path}`, { headers: { Authorization: `Bearer ${b.token}` } });
+    if (!r.ok) throw new Error(`hub answered ${r.status}`);
+    return (await r.json()) as T;
+  }
+
+  function connect(h: ConnectHandlers, sinceSeq: () => number | undefined) {
+    let ws: WebSocket | null = null;
+    let disposed = false;
+    let attempt = 0;
+    let retryTimer: number | undefined;
+    let pingTimer: number | undefined;
+    let everConnected = false;
+
+    const schedule = (authFailed = false) => {
+      if (disposed) return;
+      window.clearInterval(pingTimer);
+      // 0.5s → 10s with jitter; auth failures retry slowly.
+      const base = authFailed ? 30_000 : Math.min(10_000, 500 * 2 ** attempt);
+      const delay = base / 2 + Math.random() * (base / 2);
+      attempt++;
+      retryTimer = window.setTimeout(open, delay);
+    };
+
+    async function open() {
+      if (disposed) return;
+      h.onState(everConnected ? "reconnecting" : "connecting");
+      let b: UiBootstrap;
+      try {
+        b = await bootstrap();
+      } catch {
+        h.onState("offline", `can't reach daemon on :${daemonPort}`);
+        return schedule();
+      }
+      if (!b.hub_ws) {
+        h.onState("offline", "daemon hasn't found a hub yet");
+        return schedule();
+      }
+      const sock = new WebSocket(b.hub_ws);
+      ws = sock;
+      let welcomed = false;
+      sock.onopen = () => {
+        const since = sinceSeq();
+        const hello: ClientFrame = {
+          op: "hello",
+          token: b.token,
+          role: "ui",
+          user: b.user,
+          protocol: PROTOCOL_VERSION,
+          ...(since != null ? { since_seq: since } : {}),
+        };
+        sock.send(JSON.stringify(hello));
+      };
+      sock.onmessage = (ev) => {
+        let f: ServerFrame;
+        try {
+          f = JSON.parse(String(ev.data)) as ServerFrame;
+        } catch {
+          return;
+        }
+        if (f.op === "welcome") {
+          welcomed = true;
+          everConnected = true;
+          attempt = 0;
+          h.onState("connected");
+          pingTimer = window.setInterval(() => sock.readyState === 1 && sock.send(JSON.stringify({ op: "ping" })), PING_MS);
+        }
+        h.onFrame(f);
+      };
+      sock.onclose = (ev) => {
+        if (ws !== sock) return;
+        ws = null;
+        if (disposed) return;
+        if (ev.code === 4001) {
+          h.onState("offline", "hub rejected the token");
+          return schedule(true);
+        }
+        if (ev.code === 4002) h.onState("offline", "protocol mismatch with hub");
+        else h.onState(welcomed || everConnected ? "reconnecting" : "offline", "hub connection lost");
+        schedule();
+      };
+    }
+
+    open();
+    return () => {
+      disposed = true;
+      window.clearTimeout(retryTimer);
+      window.clearInterval(pingTimer);
+      ws?.close();
+    };
+  }
+
+  return {
+    mock: false,
+    bootstrap,
+    connect,
+    async messages(q: MessageQuery) {
+      const p = new URLSearchParams({ address: q.address, limit: String(q.limit ?? 100) });
+      if (q.with) p.set("with", q.with);
+      if (q.before) p.set("before", q.before);
+      const r = await hubGet<{ messages: StoredMessage[] }>(`/api/messages?${p}`);
+      return r.messages;
+    },
+    async send(req) {
+      const r = await fetch(`${daemon}/v1/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.detail || j.error || `daemon answered ${r.status}`);
+      return j;
+    },
+    async putContext(key, write): Promise<ContextPutResult> {
+      const r = await fetch(`${daemon}/v1/context/${encodeURIComponent(key)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(write),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 409) return { ok: false, conflict: (j as { current: ContextEntry }).current };
+      if (r.status === 503) return { ok: false, error: "Hub is offline. Your edit is still here; save again once it reconnects." };
+      if (!r.ok) return { ok: false, error: j.detail || j.error || `Save failed (${r.status})` };
+      return { ok: true, entry: j as ContextEntry };
+    },
+  };
+}

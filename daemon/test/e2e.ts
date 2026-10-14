@@ -1,0 +1,227 @@
+// End-to-end daemon test: a hub + two daemons (alex, sam) on test ports with throwaway DBs.
+//   npm run test:e2e                      -> uses test/fake-hub.ts
+//   HUB=real npm run test:e2e             -> starts ../hub (npm start) instead
+// Ports: hub 7790, alex 7791, sam 7792 (so it never collides with a dev setup on 7700-7702).
+import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import http from "node:http";
+import { pathToFileURL } from "node:url";
+
+const TOKEN = "e2e-test-token";
+const HUB_PORT = 7790;
+const PORTS = { alex: 7791, sam: 7792 } as const;
+type User = keyof typeof PORTS;
+const REAL = process.env.HUB === "real";
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlink-e2e-"));
+const daemonDir = path.resolve(import.meta.dirname, "..");
+const procs: ChildProcess[] = [];
+// Run node with the tsx loader directly (not the tsx wrapper), so SIGKILL hits the real process
+// instead of orphaning a child that keeps the port.
+const TSX_LOADER = pathToFileURL(path.resolve(daemonDir, "../node_modules/tsx/dist/loader.mjs")).href;
+let failures = 0;
+
+function check(name: string, ok: boolean, detail?: unknown) {
+  if (!ok) failures++;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${!ok && detail !== undefined ? `  -> ${JSON.stringify(detail)}` : ""}`);
+}
+
+function run(name: string, args: string[], cwd: string, env: Record<string, string>): ChildProcess {
+  const p = spawn(process.execPath, ["--import", TSX_LOADER, ...args], { cwd, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  const logFile = fs.createWriteStream(path.join(tmp, `${name}.out`), { flags: "a" });
+  p.stdout!.pipe(logFile);
+  p.stderr!.pipe(logFile);
+  procs.push(p);
+  return p;
+}
+
+function startHub() {
+  if (REAL) {
+    return run("hub", ["src/index.ts"], path.resolve(daemonDir, "../hub"), {
+      AGENTLINK_TOKEN: TOKEN,
+      AGENTLINK_HUB_PORT: String(HUB_PORT),
+      AGENTLINK_HUB_DB: path.join(tmp, "hub.sqlite"),
+    });
+  }
+  return run("hub", ["test/fake-hub.ts"], daemonDir, { AGENTLINK_TOKEN: TOKEN, FAKE_HUB_PORT: String(HUB_PORT) });
+}
+
+function startDaemon(user: User) {
+  return run(user, [path.join(daemonDir, "src/index.ts")], tmp, {
+    AGENTLINK_USER: user,
+    AGENTLINK_TOKEN: TOKEN,
+    AGENTLINK_HUB_URL: `http://127.0.0.1:${HUB_PORT}`,
+    AGENTLINK_DISCOVERY: "manual",
+    AGENTLINK_DAEMON_PORT: String(PORTS[user]),
+    AGENTLINK_DAEMON_DB: path.join(tmp, `daemon-${user}.sqlite`),
+  });
+}
+
+async function stop(p: ChildProcess, signal: NodeJS.Signals = "SIGTERM") {
+  if (p.exitCode !== null || p.signalCode !== null) return;
+  const done = new Promise((r) => p.once("exit", r));
+  p.kill(signal);
+  await done;
+}
+
+async function api(user: User, method: string, p: string, body?: unknown, headers: Record<string, string> = {}) {
+  const res = await fetch(`http://127.0.0.1:${PORTS[user]}${p}`, {
+    method,
+    headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...headers },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  return { status: res.status, headers: res.headers, body: text ? JSON.parse(text) : null };
+}
+
+async function until<T>(what: string, fn: () => Promise<T | undefined | null | false>, ms = 15_000): Promise<T> {
+  const end = Date.now() + ms;
+  let last: unknown;
+  while (Date.now() < end) {
+    try {
+      const v = await fn();
+      if (v) return v;
+    } catch (err) {
+      last = err;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(`timed out waiting for ${what}${last ? `: ${last}` : ""}`);
+}
+
+const health = (u: User) => api(u, "GET", "/v1/health").then((r) => r.body);
+const connected = (u: User) => until(`${u} connected`, async () => (await health(u)).hub.state === "connected");
+const inbox = (u: User, q = "") => api(u, "GET", `/v1/inbox${q}`).then((r) => r.body.messages as any[]);
+
+async function main() {
+  console.log(`tmp dir: ${tmp}  hub: ${REAL ? "real" : "fake"}`);
+  let hub = startHub();
+  let alex = startDaemon("alex");
+  let sam = startDaemon("sam");
+  await connected("alex");
+  await connected("sam");
+  check("both daemons connected", true);
+
+  const h = await health("alex");
+  check("health shape", h.ok === true && h.user === "alex" && h.hub.via === "manual" && h.outbox_depth === 0, h);
+
+  const sess = await api("sam", "PUT", "/v1/sessions/orchestrator", { kind: "orchestrator", status: "idle", task: "" });
+  check("PUT session", sess.status === 200 && sess.body.address === "sam/orchestrator", sess.body);
+
+  // --- SSE on sam, then basic send alex -> sam/orchestrator
+  const sseEvents: any[] = [];
+  const sseReq = http.get(`http://127.0.0.1:${PORTS.sam}/v1/inbox/stream?agent=orchestrator`, (res) => {
+    let buf = "";
+    res.on("data", (c) => {
+      buf += c;
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        const data = chunk.split("\n").find((l) => l.startsWith("data: "));
+        if (data) sseEvents.push(JSON.parse(data.slice(6)));
+      }
+    });
+  });
+  await new Promise((r) => setTimeout(r, 300));
+
+  const sent = await api("alex", "POST", "/v1/send", { to: "sam/orchestrator", type: "task", body: "build the thing" });
+  check("send -> 202", sent.status === 202 && sent.body.queued === true && typeof sent.body.id === "string", sent);
+  const got = await until("sam receives", async () => (await inbox("sam", "?agent=orchestrator")).find((m) => m.envelope.id === sent.body.id));
+  check("sam inbox has message", got.envelope.from === "alex/orchestrator" && got.envelope.hops === 1, got);
+  check("remote flag true", got.remote === true, got);
+  await until("alex outbox drained", async () => (await health("alex")).outbox_depth === 0);
+  check("alex outbox drained after accepted", true);
+  await until("SSE event", async () => sseEvents.some((e) => e.envelope.id === sent.body.id));
+  check("SSE delivered the message", true);
+
+  // broadcast sam/* shows under any agent filter
+  const bc = await api("alex", "POST", "/v1/send", { to: "sam/*", type: "chat", body: { text: "hello all" } });
+  await until("broadcast", async () => (await inbox("sam", "?agent=worker-9")).some((m) => m.envelope.id === bc.body.id));
+  check("sam/* lands in every agent's view", true);
+
+  // ack / unhandled
+  const ack = await api("sam", "POST", `/v1/inbox/${sent.body.id}/ack`);
+  check("ack -> 204", ack.status === 204, ack);
+  const unhandled = await inbox("sam", "?agent=orchestrator&unhandled=1");
+  check("acked message filtered by unhandled=1", !unhandled.some((m) => m.envelope.id === sent.body.id), unhandled);
+
+  // validation
+  check("hops 6 -> 422", (await api("alex", "POST", "/v1/send", { to: "sam/x", type: "chat", body: "x", hops: 6 })).status === 422);
+  check("bad address -> 400", (await api("alex", "POST", "/v1/send", { to: "Sam", type: "chat", body: "x" })).status === 400);
+  check("bad type -> 400", (await api("alex", "POST", "/v1/send", { to: "sam/x", type: "nope", body: "x" })).status === 400);
+
+  // CORS
+  const cors = await api("alex", "GET", "/v1/health", undefined, { origin: "http://localhost:5173" });
+  check("CORS localhost origin allowed", cors.headers.get("access-control-allow-origin") === "http://localhost:5173");
+  const evil = await api("alex", "GET", "/v1/health", undefined, { origin: "http://evil.example" });
+  check("foreign origin -> 403", evil.status === 403, evil.body);
+  const boot = await api("alex", "GET", "/v1/ui-bootstrap");
+  check("ui-bootstrap", boot.body.hub_ws === `ws://127.0.0.1:${HUB_PORT}/ws` && boot.body.token === TOKEN, boot.body);
+
+  // context proxy
+  const ctx = await api("alex", "PUT", "/v1/context/api.users", { title: "Users API", kind: "api_spec", body: "GET /users" });
+  check("context PUT proxied with author", ctx.status === 200 && ctx.body.author === "alex/orchestrator", ctx.body);
+  const ctxGet = await api("sam", "GET", "/v1/context/api.users");
+  check("context GET proxied", ctxGet.status === 200 && ctxGet.body.version === 1, ctxGet.body);
+  const peers = await api("alex", "GET", "/v1/peers");
+  check("peers proxied", peers.status === 200 && Array.isArray(peers.body.users), peers.body);
+
+  // rejected path (fake hub only)
+  if (!REAL) {
+    const rej = await api("alex", "POST", "/v1/send", { from_agent: "worker-1", to: "reject/me", type: "chat", body: "x" });
+    const note = await until("rejection note", async () =>
+      (await inbox("alex", "?agent=worker-1")).find((m) => m.envelope.reply_to === rej.body.id),
+    );
+    check("rejected -> status note in sender inbox", note.envelope.type === "status" && note.envelope.body.text === "bad_address", note);
+  }
+
+  // --- recipient down: message waits at the hub, delivered after sam restarts
+  sseReq.destroy();
+  await stop(sam);
+  const whileDown = await api("alex", "POST", "/v1/send", { to: "sam/orchestrator", type: "task", body: "while you were out" });
+  await until("accepted while sam down", async () => (await health("alex")).outbox_depth === 0);
+  sam = startDaemon("sam");
+  await until("sam gets queued message after restart", async () =>
+    (await inbox("sam")).some((m) => m.envelope.id === whileDown.body.id),
+  );
+  check("recipient restart: pending delivery arrives", true);
+
+  // --- sender's outbox survives hub outage + daemon restart
+  await stop(hub);
+  await until("alex notices hub gone", async () => (await health("alex")).hub.state !== "connected");
+  const ctxDown = await api("alex", "PUT", "/v1/context/x", { title: "x", kind: "note", body: "x" });
+  check("context PUT while offline -> 503", ctxDown.status === 503 && ctxDown.body.error === "hub_offline", ctxDown.body);
+  const queued = await api("alex", "POST", "/v1/send", { to: "sam/orchestrator", type: "task", body: "queued during outage" });
+  const ob = await api("alex", "GET", "/v1/outbox");
+  check("message sits in outbox", ob.body.items.some((i: any) => i.envelope.id === queued.body.id), ob.body);
+  await stop(alex, "SIGKILL");
+  const portFree = await health("alex").then(() => false, () => true);
+  check("killed daemon's port is closed", portFree);
+  alex = startDaemon("alex");
+  await until("alex back up", async () => (await health("alex")).outbox_depth === 1);
+  check("outbox survived kill -9", true);
+  hub = startHub();
+  await until("queued message delivered after reconnect", async () =>
+    (await inbox("sam")).some((m) => m.envelope.id === queued.body.id),
+  30_000);
+  check("outbox flushed after reconnect, delivered to sam", true);
+  check("alex outbox empty", (await health("alex")).outbox_depth === 0);
+
+  // dedupe: inbox has each id exactly once
+  const all = await inbox("sam", "?limit=1000");
+  const ids = all.map((m) => m.envelope.id);
+  check("inbox dedupe", ids.length === new Set(ids).size, ids);
+}
+
+main()
+  .catch((err) => {
+    failures++;
+    console.log(`FAIL  ${err.message}`);
+  })
+  .finally(async () => {
+    await Promise.all(procs.map((p) => stop(p)));
+    console.log(failures ? `\n${failures} failure(s). logs in ${tmp}` : "\nall passed");
+    process.exit(failures ? 1 : 0);
+  });
