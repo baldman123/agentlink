@@ -7,8 +7,8 @@ Binds `0.0.0.0` so LAN peers can reach it. CORS: allow any origin on `/api/*` (t
 
 ## mDNS
 
-Advertise `_agentlink._tcp` on the hub port, instance name `agentlink-hub-<hostname>`,
-TXT `{ v: "1", hub_id, name }`. Withdraw the advertisement on shutdown.
+Advertise `_agentlink._tcp` on the hub port, instance name = `AGENTLINK_HUB_NAME` (default `agentlink-hub-<hostname>-<port>`),
+TXT `{ v: "1", hub_id, name }` where `name` is that same value. Withdraw the advertisement on shutdown.
 
 ## Auth
 

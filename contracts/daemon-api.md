@@ -12,6 +12,7 @@ CORS: allow `http://localhost:*` and `http://127.0.0.1:*` origins only (the UI c
 | `AGENTLINK_USER` | required; this laptop's username, e.g. `alex` |
 | `AGENTLINK_TOKEN` | required; shared hub token |
 | `AGENTLINK_HUB_URL` | optional manual fallback, e.g. `http://192.168.1.20:7700`. Used when mDNS finds nothing within 5s, or immediately if `AGENTLINK_DISCOVERY=manual` |
+| `AGENTLINK_HUB_NAME` | optional; when set, mDNS only accepts a hub whose TXT `name` or `hub_id` equals it (lets several hubs share a network). Discovered hubs are keyed by host:port |
 | `AGENTLINK_DAEMON_PORT` | default 7701 |
 | `AGENTLINK_DAEMON_DB` | default `./data/daemon-<user>.sqlite` |
 
