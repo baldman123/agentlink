@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { Address } from "../../contracts/index.ts";
-import { DAEMON_PORT, MOCK, safeStorage, saveStorage, userOf } from "./lib.ts";
+import { DAEMON_PORT, MOCK, params, safeStorage, saveStorage, userOf } from "./lib.ts";
 import { mockTransport } from "./mock/mockTransport.ts";
 import { realTransport } from "./realTransport.ts";
 import { initialState, reducer } from "./store.ts";
@@ -9,6 +9,7 @@ import { ChatList } from "./components/ChatList.tsx";
 import { ChatView } from "./components/ChatView.tsx";
 import { ActivityStrip, Header, Switcher, Toasts } from "./components/Chrome.tsx";
 import { Sidebar, type Tab } from "./components/Sidebar.tsx";
+import { TeamView } from "./components/TeamView.tsx";
 
 export function App() {
   const transport = useMemo(() => (MOCK ? mockTransport(DAEMON_PORT) : realTransport(DAEMON_PORT)), []);
@@ -31,6 +32,12 @@ export function App() {
   const [feed, setFeed] = useState<Address | null>(null);
   const [contextFocus, setContextFocus] = useState<AppCtx["contextFocus"]>(null);
   const [switcher, setSwitcher] = useState(false);
+  const [view, setView] = useState<AppCtx["view"]>(() => {
+    const q = params.get("view");
+    if (q === "team" || q === "chat") return q;
+    return safeStorage<AppCtx["view"]>("al.view", "chat") === "team" ? "team" : "chat";
+  });
+  useEffect(() => saveStorage("al.view", view), [view]);
 
   // connect: bootstrap → hub WS. Live updates come only from WS events.
   useEffect(() => {
@@ -74,6 +81,7 @@ export function App() {
     (address: Address, feed?: boolean) => {
       if (!feed && state.me && userOf(address) === state.me && address !== `${state.me}/*`) {
         dispatch({ type: "select", address });
+        setView("chat");
         return;
       }
       setTab("sessions");
@@ -93,7 +101,7 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const ctx: AppCtx = { state, dispatch, transport, openContext, openFeed, contextFocus };
+  const ctx: AppCtx = { state, dispatch, transport, openContext, openFeed, contextFocus, view, setView };
 
   return (
     <Ctx.Provider value={ctx}>
@@ -103,7 +111,7 @@ export function App() {
         <main className="cols">
           <ChatList />
           <Resizer side="left" width={leftW} setWidth={setLeftW} min={200} max={380} />
-          <ChatView />
+          {view === "team" ? <TeamView /> : <ChatView />}
           <Resizer side="right" width={rightW} setWidth={setRightW} min={280} max={560} />
           <Sidebar tab={tab} setTab={setTab} feed={feed} setFeed={setFeed} />
         </main>

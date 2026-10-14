@@ -4,7 +4,7 @@ import { findSession, myChats } from "../store.ts";
 import { Skeleton, StatusDot, useApp, useNow } from "./bits.tsx";
 
 export function ChatList() {
-  const { state, dispatch } = useApp();
+  const { state, dispatch, view, setView } = useApp();
   const now = useNow();
   const chats = myChats(state);
   const all = Object.values(state.messages);
@@ -31,8 +31,11 @@ export function ChatList() {
           return (
             <li key={a}>
               <button
-                className={`chat ${state.selected === a ? "active" : ""} ${isMe ? "chat-me" : ""}`}
-                onClick={() => dispatch({ type: "select", address: a })}
+                className={`chat ${state.selected === a && view === "chat" ? "active" : ""} ${isMe ? "chat-me" : ""}`}
+                onClick={() => {
+                  dispatch({ type: "select", address: a });
+                  setView("chat");
+                }}
                 aria-current={state.selected === a}
               >
                 <span className="chat-dot">{isMe ? <span className="me-mark" aria-hidden>◆</span> : <StatusDot status={s?.status ?? "offline"} />}</span>

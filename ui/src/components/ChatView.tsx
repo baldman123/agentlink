@@ -2,9 +2,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Address, MessageType, StoredMessage } from "../../../contracts/index.ts";
 import { HUMAN_AGENT } from "../../../contracts/index.ts";
 import { clockTime, involves, userOf } from "../lib.ts";
-import { findSession, myChats } from "../store.ts";
+import { findSession, myChats, sortSessions } from "../store.ts";
 import { Addr, Avatar, Skeleton, StatusDot, useApp } from "./bits.tsx";
 import { MessageItem } from "./Message.tsx";
+import { ViewToggle } from "./ViewToggle.tsx";
 
 const GROUP_MS = 3 * 60_000;
 
@@ -145,9 +146,15 @@ function Composer({ address, replyTo, clearReply }: { address: Address; replyTo:
   const { state, transport } = useApp();
   const me = state.me!;
   const own = myChats(state).filter((a) => a !== `${me}/${HUMAN_AGENT}`);
-  const remoteOrchs = Object.values(state.users)
+  // every remote orchestrator and worker, grouped by user
+  const remote = Object.values(state.users)
     .filter((u) => u.user !== me)
-    .flatMap((u) => u.sessions.filter((s) => s.kind === "orchestrator").map((s) => s.address));
+    .sort((a, b) => a.user.localeCompare(b.user))
+    .map((u) => ({
+      user: u.user,
+      addrs: sortSessions(u.sessions.filter((s) => s.kind === "orchestrator" || s.kind === "worker")).map((s) => s.address),
+    }))
+    .filter((g) => g.addrs.length > 0);
 
   const defaultTo = address === `${me}/${HUMAN_AGENT}` ? own[0] ?? "*" : address;
   const [to, setTo] = useState<Address>(defaultTo);
@@ -166,7 +173,9 @@ function Composer({ address, replyTo, clearReply }: { address: Address; replyTo:
     }
   }, [replyTo]);
 
-  const options = new Set<Address>([...own, ...remoteOrchs, "*", to]);
+  const listed = new Set<Address>([...own, ...remote.flatMap((g) => g.addrs), "*"]);
+  // a reply target that isn't a listed session (e.g. someone's human) still needs an option
+  const extra = listed.has(to) ? null : to;
 
   const send = async () => {
     const body = text.trim();
@@ -185,7 +194,7 @@ function Composer({ address, replyTo, clearReply }: { address: Address; replyTo:
     }
   };
 
-  const remote = to === "*" || userOf(to) !== me;
+  const isRemote = to === "*" || userOf(to) !== me;
   return (
     <div className="composer">
       {replyTo && (
@@ -214,12 +223,19 @@ function Composer({ address, replyTo, clearReply }: { address: Address; replyTo:
         <label className="sel">
           <span>To</span>
           <select value={to} onChange={(e) => setTo(e.target.value)}>
-            <optgroup label="Your agents">
-              {[...options].filter((a) => a !== "*" && userOf(a) === me).map((a) => <option key={a} value={a}>{a}</option>)}
+            <optgroup label={`Your agents (${me})`}>
+              {own.map((a) => <option key={a} value={a}>{a}</option>)}
             </optgroup>
-            <optgroup label="Other users">
-              {[...options].filter((a) => a !== "*" && userOf(a) !== me).map((a) => <option key={a} value={a}>{a}</option>)}
-            </optgroup>
+            {remote.map((g) => (
+              <optgroup key={g.user} label={g.user}>
+                {g.addrs.map((a) => <option key={a} value={a}>{a}</option>)}
+              </optgroup>
+            ))}
+            {extra && (
+              <optgroup label="Replying to">
+                <option value={extra}>{extra}</option>
+              </optgroup>
+            )}
             <optgroup label="Broadcast">
               <option value="*">* everyone</option>
             </optgroup>
@@ -231,7 +247,7 @@ function Composer({ address, replyTo, clearReply }: { address: Address; replyTo:
             {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
         </label>
-        {remote && <span className="hint" title="Messages to other users arrive as requests; they decide whether to act.">Arrives as a request</span>}
+        {isRemote && <span className="hint" title="Messages to other users arrive as requests; they decide whether to act.">Arrives as a request</span>}
         {err && <span className="err">{err}</span>}
         <span className="grow" />
         <kbd className="kbd">⌘↵</kbd>
@@ -281,6 +297,8 @@ export function ChatView() {
           </div>
           <div className="ch-task">{isMe ? "Everything sent to or from you, including broadcasts" : s?.task || "No current task"}</div>
         </div>
+        <span className="grow" />
+        <ViewToggle />
       </div>
       <MessageList address={address} onReply={setReplyTo} />
       <Composer address={address} replyTo={replyTo} clearReply={() => setReplyTo(null)} />

@@ -487,9 +487,9 @@ select, input[type="search"], .field input {
 .conflict-preview { max-height: 140px; overflow: auto; margin-top: 6px; padding: 6px 8px; background: var(--sunk); border-radius: 6px; font-size: 12px; }
 
 /* ---------- toasts ---------- */
-.toasts { position: fixed; right: 16px; top: 92px; display: flex; flex-direction: column; gap: 8px; z-index: 20; pointer-events: none; }
+.toasts { position: fixed; right: 16px; bottom: 16px; width: min(360px, calc(var(--right) - 32px)); display: flex; flex-direction: column-reverse; gap: 8px; z-index: 20; pointer-events: none; }
 .toast {
-  pointer-events: auto; display: flex; gap: 12px; align-items: center; width: 360px; padding: 10px 12px;
+  pointer-events: auto; display: flex; gap: 12px; align-items: center; width: 100%; padding: 10px 12px;
   background: var(--raised); border: 1px solid var(--line-strong); border-left: 3px solid var(--accent);
   border-radius: 8px; box-shadow: var(--shadow); font-size: 12.5px;
   animation: toastin 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -497,7 +497,7 @@ select, input[type="search"], .field input {
 .toast-body { flex: 1; min-width: 0; color: var(--muted); }
 .toast-body .addr-agent { color: var(--text); }
 .toast-actions { display: flex; gap: 10px; }
-@keyframes toastin { from { opacity: 0; transform: translateY(-8px); } }
+@keyframes toastin { from { opacity: 0; transform: translateY(8px); } }
 
 /* ---------- switcher ---------- */
 .scrim { position: fixed; inset: 0; background: rgba(5, 7, 10, 0.5); display: grid; justify-items: center; align-items: start; padding-top: 14vh; z-index: 30; animation: fade 0.12s; }
@@ -509,6 +509,93 @@ select, input[type="search"], .field input {
 .sw-task { flex: 1; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sw-kind { font-size: 11px; color: var(--faint); }
 @keyframes fade { from { opacity: 0; } }
+
+/* ---------- chat / team toggle ---------- */
+.seg { display: inline-flex; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--sunk); flex: none; }
+.seg button { height: 24px; padding: 0 11px; border-radius: 5px; font-size: 12.5px; font-weight: 600; color: var(--muted); transition: background-color 0.12s, color 0.12s; }
+.seg button:hover { color: var(--text); }
+.seg button.on { background: var(--raised); color: var(--text); box-shadow: 0 0 0 1px var(--line-strong); }
+.via {
+  font: 600 9.5px/1 "JetBrains Mono Variable", monospace; letter-spacing: 0.04em; color: var(--accent-text);
+  border: 1px solid var(--accent-line); border-radius: 3px; padding: 2px 5px;
+}
+.kind-worker { color: var(--faint); }
+
+/* ---------- team view ---------- */
+.team-scroll { flex: 1; min-height: 0; overflow: auto; padding: 16px 20px 24px; }
+.team-canvas { position: relative; display: flex; flex-wrap: wrap; gap: 22px; align-content: flex-start; }
+.wires { position: absolute; inset: 0 auto auto 0; pointer-events: none; z-index: 0; overflow: visible; }
+.wire-base { stroke: var(--faint); stroke-width: 1.2; stroke-dasharray: 3 4; opacity: 0.55; }
+.pulse-track { stroke: var(--accent); stroke-width: 1.5; opacity: 0; animation: track 1.1s ease-out forwards; }
+.pulse-head {
+  stroke: var(--accent); stroke-width: 4; stroke-linecap: round; fill: none;
+  stroke-dasharray: 0.1 1.2; stroke-dashoffset: 0.1;
+  animation: travel 1.1s cubic-bezier(0.45, 0, 0.3, 1) forwards;
+  filter: drop-shadow(0 0 4px var(--accent));
+}
+.pulse-cross .pulse-track { stroke-dasharray: 6 4; }
+@keyframes travel { to { stroke-dashoffset: -1; } }
+@keyframes track { 15% { opacity: 0.45; } 100% { opacity: 0; } }
+
+.cluster {
+  position: relative; flex: 1 1 440px; min-width: 0; padding: 10px 14px 14px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  box-shadow: inset 3px 0 0 var(--u);
+}
+.cluster-off { opacity: 0.6; }
+.cluster-head { position: relative; z-index: 1; display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.cluster-user { font-weight: 700; font-size: 14px; }
+.cl-grid {
+  position: relative; z-index: 1;
+  display: grid; grid-template-columns: 1fr 96px 1fr; grid-template-rows: 62px 96px 62px; gap: 8px 14px;
+  grid-template-areas: "w1 . w2" ". o ." "w3 . w4";
+}
+.slot-worker-1 { grid-area: w1; }
+.slot-worker-2 { grid-area: w2; }
+.slot-worker-3 { grid-area: w3; }
+.slot-worker-4 { grid-area: w4; }
+.slot-orchestrator { grid-area: o; }
+.cl-extras { position: relative; z-index: 1; margin-top: 10px; font-size: 12px; color: var(--faint); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.extra { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; }
+
+.tnode {
+  position: relative; display: flex; flex-direction: column; justify-content: center; gap: 3px; min-width: 0;
+  padding: 8px 11px; border-radius: 9px; border: 1px solid var(--line-strong); background: var(--raised);
+  overflow: hidden; transition: border-color 0.2s, box-shadow 0.25s;
+}
+button.tnode:hover { border-color: var(--faint); }
+.tnode-top { display: flex; align-items: center; gap: 7px; }
+.tnode-name { font-weight: 600; font-size: 13px; white-space: nowrap; }
+.tnode-task { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tnode-empty { border-style: dashed; background: transparent; color: var(--faint); }
+.tnode-empty .tnode-name { color: var(--faint); font-weight: 500; }
+.tnode-empty .tnode-task { color: var(--faint); }
+.tnode.st-error { border-color: color-mix(in srgb, var(--error) 55%, transparent); }
+.tnode.st-offline { opacity: 0.55; }
+.tnode.ring { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* worker "working": a scan line sweeps along the top edge */
+.scan { position: absolute; left: 0; right: 0; top: 0; height: 2px; opacity: 0; }
+.st-working .scan {
+  opacity: 1;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent) 0 0 / 40% 100% no-repeat;
+  animation: scan 1.6s linear infinite;
+}
+@keyframes scan { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+
+/* orchestrator: the claude4 circle, with an orbit ring while working */
+.tnode-orch { width: 96px; height: 96px; border-radius: 50%; align-items: center; text-align: center; padding: 10px; overflow: visible; border-width: 1.5px; }
+.tnode-orch .tnode-top { flex-direction: column; gap: 4px; }
+.tnode-orch .tnode-name { font-size: 12px; }
+.tnode-orch .tnode-task { max-width: 74px; font-size: 10.5px; }
+.orbit { position: absolute; inset: -6px; border-radius: 50%; border: 1.5px dashed transparent; pointer-events: none; }
+.st-working .orbit { border-color: var(--accent-line); animation: spin 7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.tnode-human {
+  flex-direction: row; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; font-size: 11.5px; color: var(--muted);
+  overflow: visible;
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }

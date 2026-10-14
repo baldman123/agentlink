@@ -22,6 +22,16 @@ export interface Activity {
   toast: boolean;
 }
 
+/** A live message hop, drawn as a pulse in the Team view. Only created from live hub events. */
+export interface Pulse {
+  id: string; // message id
+  from: Address;
+  to: Address;
+  type: string;
+  at: number; // when accepted (ms)
+  deliveredAt?: number;
+}
+
 export interface State {
   me: string | null;
   conn: ConnState;
@@ -38,6 +48,7 @@ export interface State {
   selected: Address | null;
   activity: Activity[];
   flash: Record<string, number>; // context key -> when it last changed live
+  pulses: Pulse[];
 }
 
 export const initialState: State = {
@@ -56,7 +67,27 @@ export const initialState: State = {
   selected: null,
   activity: [],
   flash: {},
+  pulses: [],
 };
+
+const PULSE_KEEP_MS = 4000;
+
+/** Orchestrator first, then worker-1..N by number, then everything else by name. */
+export function sessionRank(s: Pick<Session, "agent" | "kind">): [number, number, string] {
+  if (s.kind === "orchestrator" || s.agent === "orchestrator") return [0, 0, s.agent];
+  const n = /^worker-(\d+)$/.exec(s.agent);
+  if (n) return [1, Number(n[1]), s.agent];
+  return [2, 0, s.agent];
+}
+export function sortSessions<T extends Pick<Session, "agent" | "kind">>(xs: T[]): T[] {
+  return [...xs].sort((a, b) => {
+    const [a0, a1, a2] = sessionRank(a);
+    const [b0, b1, b2] = sessionRank(b);
+    return a0 - b0 || a1 - b1 || a2.localeCompare(b2);
+  });
+}
+/** A user runs a claude4 team when its sessions include worker-N agents. */
+export const viaClaude4 = (u: UserPresence) => u.sessions.some((s) => /^worker-\d+$/.test(s.agent));
 
 export type Action =
   | { type: "boot"; me: string; hubUrl: string | null }
@@ -73,7 +104,7 @@ const LIVE_WINDOW_MS = 15_000; // replayed events older than this don't toast
 export function myChats(s: State): Address[] {
   if (!s.me) return [];
   const own = s.users[s.me]?.sessions ?? [];
-  return [`${s.me}/${HUMAN_AGENT}`, ...own.filter((x) => x.agent !== HUMAN_AGENT).map((x) => x.address)];
+  return [`${s.me}/${HUMAN_AGENT}`, ...sortSessions(own.filter((x) => x.agent !== HUMAN_AGENT)).map((x) => x.address)];
 }
 
 export function findSession(s: State, a: Address): Session | undefined {
@@ -103,9 +134,13 @@ function applyEvent(s: State, f: EventFrame): State {
       const m = e.message;
       if (s.messages[m.id] && e.type === "message.accepted") return next;
       next.messages = { ...s.messages, [m.id]: m };
-      // unread: chats this message reaches that aren't open, unless you sent it
       // context_update envelopes duplicate context.updated, which already has its own activity line
       if (m.type === "context_update") return next;
+      if (live && e.type === "message.accepted") {
+        const now = Date.now();
+        next.pulses = [...s.pulses.filter((p) => now - p.at < PULSE_KEEP_MS), { id: m.id, from: m.from, to: m.to, type: m.type, at: now }];
+      }
+      // unread: chats this message reaches that aren't open, unless you sent it
       if (s.me && m.from !== `${s.me}/${HUMAN_AGENT}`) {
         const unread = { ...s.unread };
         for (const addr of myChats(s)) {
@@ -133,6 +168,8 @@ function applyEvent(s: State, f: EventFrame): State {
       const m = s.messages[e.id];
       if (!m) return next;
       next.messages = { ...s.messages, [e.id]: { ...m, state: "delivered", delivered_at: e.at } };
+      if (s.pulses.some((p) => p.id === e.id && !p.deliveredAt))
+        next.pulses = s.pulses.map((p) => (p.id === e.id ? { ...p, deliveredAt: Date.now() } : p));
       return next;
     }
     case "session.updated":

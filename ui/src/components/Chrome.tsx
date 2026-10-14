@@ -118,7 +118,7 @@ export function Toasts() {
 }
 
 export function Switcher({ close }: { close(): void }) {
-  const { state, dispatch, openFeed } = useApp();
+  const { state, openFeed } = useApp();
   const [q, setQ] = useState("");
   const [i, setI] = useState(0);
   const input = useRef<HTMLInputElement>(null);
@@ -134,8 +134,7 @@ export function Switcher({ close }: { close(): void }) {
   }, [state, q]);
 
   const choose = (x: { a: Address; own: boolean }) => {
-    if (x.own) dispatch({ type: "select", address: x.a });
-    else openFeed(x.a);
+    openFeed(x.a, !x.own); // own agents open as chats (switching to the chat view), others as read-only feeds
     close();
   };
 

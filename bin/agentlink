@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# agentlink CLI wrapper for claude4 teams (contracts/bridge.md, "Outbound"). No install needed; works from any cwd.
+#
+# Reads ${AGENTLINK_DATA_DIR:-<repo>/data}/local.env if present and takes only AGENTLINK_USER and
+# AGENTLINK_DAEMON_PORT from it (KEY=VALUE lines, # comments; the file is parsed, never sourced, so the token
+# and other keys in it are ignored). A variable already set in the environment wins over the file, and a
+# --port/--daemon given on the command line wins over both.
+#
+#   agentlink inbox --brief
+#   agentlink reply 1a2b3c4d "done, see PR #3"
+#   AGENTLINK_AGENT=worker-2 agentlink send sam/orchestrator chat "hi"
+set -euo pipefail
+
+# resolve this script's real location through symlinks
+src="${BASH_SOURCE[0]}"
+while [[ -L "$src" ]]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+
+ENV_FILE="${AGENTLINK_DATA_DIR:-$ROOT/data}/local.env"
+if [[ -f "$ENV_FILE" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}" # trim leading space
+    line="${line#export }"
+    case "$line" in
+      AGENTLINK_USER=* | AGENTLINK_DAEMON_PORT=*)
+        key="${line%%=*}"
+        val="${line#*=}"
+        val="${val%\"}" val="${val#\"}" val="${val%\'}" val="${val#\'}"
+        if [[ -z "${!key:-}" ]]; then export "$key=$val"; fi
+        ;;
+    esac
+  done < "$ENV_FILE"
+fi
+
+args=()
+if [[ -n "${AGENTLINK_DAEMON_PORT:-}" ]]; then
+  if [[ ! "$AGENTLINK_DAEMON_PORT" =~ ^[0-9]+$ ]]; then
+    echo "agentlink: AGENTLINK_DAEMON_PORT must be a number (got '$AGENTLINK_DAEMON_PORT')" >&2
+    exit 1
+  fi
+  args+=(--port "$AGENTLINK_DAEMON_PORT")
+fi
+
+exec node "$ROOT/orchestrator/bin/agentlink.mjs" ${args[@]+"${args[@]}"} "$@"

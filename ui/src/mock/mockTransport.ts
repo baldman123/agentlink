@@ -31,19 +31,20 @@ export function mockTransport(daemonPort: number): Transport {
   const users = new Map<string, UserPresence>();
   const addUser = (user: string, connected: boolean, ip: string, sessions: Session[]) =>
     users.set(user, { user, connected, hub_address: ip, sessions });
+  // two claude4 teams: an orchestrator plus worker-1..4 on each laptop
   addUser("alex", true, "192.168.1.20", [
-    session("alex", "orchestrator", "orchestrator", "working", "Splitting the billing API into three tasks", 40_000),
+    session("alex", "orchestrator", "orchestrator", "working", "coordinating 4 workers", 40_000),
     session("alex", "worker-1", "worker", "working", "Writing invoice endpoint handlers", 15_000),
     session("alex", "worker-2", "worker", "idle", "", 9 * 60_000),
-    session("alex", "reviewer", "worker", "waiting", "Waiting on schema decision from sam", 4 * 60_000),
+    session("alex", "worker-3", "worker", "working", "PDF rendering for invoices", 30_000),
+    session("alex", "worker-4", "worker", "waiting", "Waiting on schema decision from sam", 4 * 60_000),
   ]);
   addUser("sam", true, "192.168.1.34", [
-    session("sam", "orchestrator", "orchestrator", "working", "Integrating payments client", 25_000),
+    session("sam", "orchestrator", "orchestrator", "working", "coordinating 4 workers", 25_000),
     session("sam", "worker-1", "worker", "idle", "", 6 * 60_000),
     session("sam", "worker-2", "worker", "error", "Migration 0042 failed on CI", 2 * 60_000),
-  ]);
-  addUser("priya", false, "192.168.1.51", [
-    session("priya", "orchestrator", "orchestrator", "offline", "Load-testing webhooks", 48 * 60_000),
+    session("sam", "worker-3", "worker", "working", "Payments client: read invoices", 20_000),
+    session("sam", "worker-4", "worker", "working", "Webhook load test", 50_000),
   ]);
 
   const context = new Map<string, ContextEntry>();
@@ -100,7 +101,7 @@ export function mockTransport(daemonPort: number): Transport {
 
   // seed history
   const t1 = store("alex/human", "alex/orchestrator", "task", "Plan the billing API split. Ask sam for the invoice schema before workers start.", 30 * 60_000);
-  store("alex/orchestrator", "alex/human", "result", "Plan is ready:\n\n1. `worker-1`: invoice endpoints\n2. `worker-2`: PDF rendering\n3. `reviewer`: contract tests\n\nI've asked sam/orchestrator for the schema.", 28 * 60_000, t1.id);
+  store("alex/orchestrator", "alex/human", "result", "Plan is ready:\n\n1. `worker-1`: invoice endpoints\n2. `worker-3`: PDF rendering\n3. `worker-4`: contract tests\n\nI've asked sam/orchestrator for the schema.", 28 * 60_000, t1.id);
   const t2 = store("alex/orchestrator", "sam/orchestrator", "task", "Can you share the current `Invoice` shape? Our workers start on endpoints next.", 27 * 60_000);
   store("sam/orchestrator", "alex/orchestrator", "result", "Posted it to shared context as **API schema** (v3). `amount_cents` is an integer, never a float.", 25 * 60_000, t2.id);
   store("alex/worker-1", "alex/orchestrator", "status", { status: "working", task: "Writing invoice endpoint handlers" }, 14 * 60_000);
@@ -115,7 +116,7 @@ export function mockTransport(daemonPort: number): Transport {
     text: "Heads up: migration 0042 fails on CI. Don't merge schema changes for now.",
     log: "Error: relation \"invoices\" already exists\n    at Migrator.up (migrate.ts:88)\n    at async run (migrate.ts:21)\nexit code 1",
   }, 2 * 60_000);
-  store("alex/reviewer", "alex/orchestrator", "chat", "Contract tests are blocked until sam confirms whether `currency` can be null.", 4 * 60_000);
+  store("alex/worker-4", "alex/orchestrator", "chat", "Contract tests are blocked until sam confirms whether `currency` can be null.", 4 * 60_000);
   store("sam/orchestrator", "sam/worker-1", "task", "Wire the payments client to read invoices from alex's endpoints.", 20 * 60_000);
 
   // event log
@@ -157,9 +158,10 @@ export function mockTransport(daemonPort: number): Transport {
   // scripted background activity
   const script: Array<() => void> = [
     () => {
-      const m = sendMsg(`${other}/orchestrator`, `${me}/orchestrator`, "task", "Can your reviewer run the contract tests against our staging payments client? No rush.");
-      touch(`${other}/orchestrator`, { status: "waiting", task: `Waiting on ${me}/reviewer` });
-      setTimeout(() => sendMsg(`${me}/orchestrator`, `${other}/orchestrator`, "result", "Queued it for the reviewer. I'll post results to shared context.", m.id), 2200);
+      const m = sendMsg(`${other}/orchestrator`, `${me}/orchestrator`, "task", "Can your worker-4 run the contract tests against our staging payments client? No rush.");
+      touch(`${other}/orchestrator`, { status: "waiting", task: `Waiting on ${me}/worker-4` });
+      setTimeout(() => sendMsg(`${me}/orchestrator`, `${me}/worker-4`, "task", "Run the contract tests against sam's staging payments client."), 1200);
+      setTimeout(() => sendMsg(`${me}/orchestrator`, `${other}/orchestrator`, "result", "Queued it for worker-4. I'll post results to shared context.", m.id), 2200);
     },
     () => {
       touch(`${me}/worker-2`, { status: "working", task: "Rendering invoice PDFs" });
@@ -186,13 +188,9 @@ export function mockTransport(daemonPort: number): Transport {
       touch(`${me}/worker-1`, { status: "working" });
     },
     () => {
-      const u = users.get("priya")!;
-      u.connected = !u.connected;
-      emit(u.connected ? { type: "user.connected", user: "priya", hub_address: u.hub_address } : { type: "user.disconnected", user: "priya" });
-      const s = u.sessions[0];
-      s.status = u.connected ? "idle" : "offline";
-      s.last_activity = iso();
-      emit({ type: "session.updated", session: { ...s } });
+      // a remote worker asks one of our workers directly (bridge DIRECT mode)
+      sendMsg(`${other}/worker-3`, `${me}/worker-1`, "chat", "Is `GET /invoices/:id` stable enough to code against?");
+      setTimeout(() => sendMsg(`${me}/worker-1`, `${other}/worker-3`, "result", "Yes. Shape matches **API schema** v3."), 1600);
     },
     () => {
       sendMsg(`${other}/worker-1`, "*", "chat", "Payments client now reads `amount_cents` as an integer. Ping me if anything breaks.");
@@ -206,13 +204,41 @@ export function mockTransport(daemonPort: number): Transport {
       emit({ type: "context.updated", entry: { ...e } });
     },
   ];
+  // steady team chatter: orchestrators hand out work, workers report back, statuses flip
+  const TASKS = ["Add pagination to /invoices", "Fix flaky migration test", "Write PDF snapshot tests", "Retry webhook deliveries", "Review payments client PR", "Profile invoice query"];
+  const chatter = () => {
+    const team = pick([me, other]);
+    const w = `${team}/worker-${1 + Math.floor(Math.random() * 4)}`;
+    const roll = Math.random();
+    if (roll < 0.4) {
+      const task = pick(TASKS);
+      sendMsg(`${team}/orchestrator`, w, "task", task);
+      touch(w, { status: "working", task });
+    } else if (roll < 0.75) {
+      sendMsg(w, `${team}/orchestrator`, "result", pick(["Done, tests pass.", "Pushed to branch, PR open.", "Blocked: need the schema decision.", "Fixed; it was a race in setup."]));
+      touch(w, { status: pick<SessionStatus>(["idle", "idle", "waiting"]), task: "" });
+    } else if (roll < 0.9) {
+      const peer = `${team === me ? other : me}/orchestrator`;
+      sendMsg(`${team}/orchestrator`, peer, "chat", "Status: two workers busy, two free. Anything for us?");
+    } else {
+      touch(`${team}/orchestrator`, { status: pick<SessionStatus>(["working", "working", "waiting"]) });
+    }
+  };
+
   let scriptIdx = 0;
   let scriptTimer: number | undefined;
+  let chatterTimer: number | undefined;
   const runScript = () => {
     scriptTimer = window.setTimeout(() => {
       if (connected) script[scriptIdx++ % script.length]();
       runScript();
     }, 4000 + Math.random() * 4000);
+  };
+  const runChatter = () => {
+    chatterTimer = window.setTimeout(() => {
+      if (connected) chatter();
+      runChatter();
+    }, 900 + Math.random() * 1400);
   };
 
   const snapshot = (): ServerFrame => ({
@@ -256,10 +282,12 @@ export function mockTransport(daemonPort: number): Transport {
       sinceFn = since;
       open(false);
       runScript();
+      runChatter();
       return () => {
         connected = false;
         handlers = null;
         window.clearTimeout(scriptTimer);
+        window.clearTimeout(chatterTimer);
       };
     },
     async messages(q) {

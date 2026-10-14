@@ -1,7 +1,7 @@
 import type { Address } from "../../../contracts/index.ts";
 import { HUMAN_AGENT } from "../../../contracts/index.ts";
 import { relTime, userOf } from "../lib.ts";
-import { findSession } from "../store.ts";
+import { findSession, sortSessions, viaClaude4 } from "../store.ts";
 import { Addr, Avatar, Skeleton, StatusDot, useApp, useNow } from "./bits.tsx";
 import { MessageList } from "./ChatView.tsx";
 import { ContextPanel } from "./ContextPanel.tsx";
@@ -24,13 +24,14 @@ function Sessions() {
   return (
     <div className="sessions">
       {users.map((u) => {
-        const sessions = u.sessions.filter((s) => s.agent !== HUMAN_AGENT);
+        const sessions = sortSessions(u.sessions.filter((s) => s.agent !== HUMAN_AGENT));
         return (
           <section key={u.user} className="ugroup">
             <header className="ugroup-head">
               <Avatar user={u.user} size={22} />
               <span className="ugroup-name">{u.user}{u.user === state.me && <span className="you"> (you)</span>}</span>
               <span className={`presence ${u.connected ? "on" : "off"}`}>{u.connected ? "online" : "offline"}</span>
+              {viaClaude4(u) && <span className="via">via claude4</span>}
               {u.hub_address && <span className="ip">{u.hub_address}</span>}
             </header>
             {sessions.length === 0 && <div className="empty small inline">No agents running.</div>}
@@ -42,7 +43,7 @@ function Sessions() {
                     <span className="sess-main">
                       <span className="sess-name">
                         {s.agent}
-                        {s.kind !== "worker" && <span className="kind">{s.kind === "orchestrator" ? "orch" : s.kind}</span>}
+                        <span className={`kind kind-${s.kind}`}>{s.kind === "orchestrator" ? "orch" : s.kind}</span>
                       </span>
                       <span className="sess-task">{s.task || <em>{s.status}</em>}</span>
                     </span>

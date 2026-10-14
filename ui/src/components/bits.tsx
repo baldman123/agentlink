@@ -11,6 +11,8 @@ export interface AppCtx {
   /** Read-only feed in the sidebar. Without `feed`, your own agents open as chats instead. */
   openFeed(address: Address, feed?: boolean): void;
   contextFocus: { key: string; at: number } | null;
+  view: "chat" | "team";
+  setView(v: "chat" | "team"): void;
 }
 export const Ctx = createContext<AppCtx>(null!);
 export const useApp = () => useContext(Ctx);

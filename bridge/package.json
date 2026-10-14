@@ -1,0 +1,15 @@
+{
+  "name": "bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "test": "tsx test/bridge.test.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.23.15"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5"
+  }
+}

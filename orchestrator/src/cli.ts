@@ -3,7 +3,30 @@
 
 import { HOP_LIMIT, type ContextKind, type InboxItem, type MessageType, type RichBody, type SessionStatus } from "../../contracts/index.ts";
 import { CONTEXT_KINDS, DaemonClient, DaemonError, HopLimitError, MESSAGE_TYPES, SESSION_STATUSES } from "./client.ts";
-import { decide, formatContext, formatItem, formatPeers, forwardBlockReason, itemToJson, loadDecisions, verifiedReplies } from "./trust.ts";
+import {
+  approvalState,
+  bodyToText,
+  decide,
+  formatContext,
+  formatItem,
+  formatPeers,
+  forwardBlockReason,
+  isUntrusted,
+  itemToJson,
+  loadDecisions,
+  recordReplyDecision,
+  verifiedReplies,
+  type DecisionRecord,
+} from "./trust.ts";
+
+/** One line per item: id8, type, from → to, trust/approval, body start (JSON-quoted so it can't fake a line). */
+function briefLine(it: InboxItem, d: DecisionRecord | undefined, verified: boolean): string {
+  const e = it.envelope;
+  const trust = isUntrusted(it) ? `REMOTE:${approvalState(e, d, verified)}` : "local";
+  const text = bodyToText(e.body).replace(/\s+/g, " ").trim();
+  const snippet = JSON.stringify(text.length > 70 ? text.slice(0, 69) + "…" : text);
+  return `${e.id.slice(0, 8)}  ${e.type.padEnd(14)} ${e.from} → ${e.to}  ${trust}${it.handled ? " [handled]" : ""}  ${snippet}`;
+}
 
 const HELP = `agentlink — orchestrator CLI for the local agentlink daemon
 
@@ -11,11 +34,17 @@ Usage: agentlink <command> [args] [--daemon URL | --port N] [--json]
 
   send <to> <type> <body|->     send a message (type: ${MESSAGE_TYPES.join("|")}); "-" reads body from stdin
        [--reply-to ID] [--from AGENT] [--rich]   --rich parses body as a JSON RichBody
-  inbox [--agent A] [--all] [--watch]           unhandled items (--all includes handled; --watch streams new ones)
+  inbox [--agent A] [--all] [--watch] [--brief] unhandled items (--all includes handled; --watch streams new ones;
+                                 --brief prints one line per item)
+  reply <id> <text|->            answer an item: sends a result to its sender with reply_to set, records approval
+                                 if it was a pending remote request, and marks it handled
   ack <id>                       mark an inbox item handled
-  forward <id> <to> [--note TEXT] [--from AGENT] relay a received message (hops+1; refused when > ${HOP_LIMIT})
+  forward <id> <to> [--note TEXT] relay a received message (hops+1; refused when > ${HOP_LIMIT})
   approve <id> [--note TEXT]     record the local user's approval of a remote request and tell the requester
   decline <id> [reason]          record a decline and send the reason back
+
+  <id> may be the full id or a unique prefix of at least 4 characters (the bridge pastes 8).
+  The sender is --from AGENT, else $AGENTLINK_AGENT, else "orchestrator".
   ctx list [query]               list shared context entries
   ctx get <key>
   ctx set <key> --title T --kind ${CONTEXT_KINDS.join("|")} [--body B | stdin] [--base-version N]
@@ -31,7 +60,7 @@ interface Parsed {
   flags: Record<string, string | true>;
 }
 
-const BOOL_FLAGS = new Set(["all", "watch", "json", "rich", "help", "h"]);
+const BOOL_FLAGS = new Set(["all", "watch", "json", "rich", "brief", "help", "h"]);
 
 function parseArgs(argv: string[]): Parsed {
   const pos: string[] = [];
@@ -83,7 +112,14 @@ async function main() {
     return;
   }
   const baseUrl = str(flags, "daemon") ?? (str(flags, "port") ? `http://127.0.0.1:${str(flags, "port")}` : undefined);
-  const client = new DaemonClient({ baseUrl, agent: str(flags, "from") ?? str(flags, "agent") });
+  // sender: --from, else AGENTLINK_AGENT, else "orchestrator" (DaemonClient falls back to the env var)
+  const client = new DaemonClient({ baseUrl, agent: str(flags, "from") });
+  // local.env (via bin/agentlink) names the user; refuse to act as someone else if the port points at another daemon
+  const expectedUser = process.env.AGENTLINK_USER;
+  if (expectedUser) {
+    const actual = await client.getUser();
+    if (actual !== expectedUser) fail(`daemon at ${client.baseUrl} belongs to "${actual}", but AGENTLINK_USER is "${expectedUser}"; check data/local.env or --port`);
+  }
 
   switch (cmd) {
     case "send": {
@@ -114,6 +150,7 @@ async function main() {
           const d = decisions.get(it.envelope.id);
           const v = replies.has(it.envelope.id);
           if (json) process.stdout.write(JSON.stringify(itemToJson(it, d, v)) + "\n");
+          else if (flags.brief === true) process.stdout.write(briefLine(it, d, v) + "\n");
           else process.stdout.write(formatItem(it, d, v) + "\n");
         }
       };
@@ -148,18 +185,43 @@ async function main() {
       return;
     }
 
+    case "reply": {
+      const [ref, textArg] = args;
+      if (!ref || textArg === undefined) fail('usage: reply <id> "<text>"  ("-" reads the text from stdin)');
+      const text = textArg === "-" ? (await readStdin()).replace(/\n$/, "") : args.slice(1).join(" ");
+      if (!text.trim()) fail("reply text is empty");
+      const item = await client.resolveInboxItem(ref);
+      const e = item.envelope;
+      const user = await client.getUser();
+      const prior = loadDecisions(user).get(e.id);
+      if (prior?.decision === "declined") fail(`${e.id} was declined by ${prior.by} at ${prior.at}; not replying`);
+      if (e.from.split("/")[0] === user && e.from.split("/")[1] === "agentlink") fail(`${e.id} is a local daemon note; nothing to reply to (ack it instead)`);
+      const verified = (await verifiedReplies(client, [item])).has(e.id);
+      // hops: send() sees reply_to in this inbox and uses original.hops + 1, refusing past the limit
+      const res = await client.send({ to: e.from, type: "result", body: text, reply_to: e.id, from_agent: str(flags, "from") });
+      const recorded = recordReplyDecision(user, item, res.id, { verifiedReply: verified });
+      await client.ack(e.id);
+      out(
+        json,
+        { id: res.id, to: e.from, reply_to: e.id, approval_recorded: !!recorded, handled: true },
+        `replied to ${e.id.slice(0, 8)} (${e.from}) with result ${res.id}; ${recorded ? "recorded as approved, " : ""}marked handled`,
+      );
+      return;
+    }
+
     case "ack": {
       if (!args[0]) fail("usage: ack <id>");
-      await client.ack(args[0]);
-      out(json, { ok: true, id: args[0] }, `acked ${args[0]}`);
+      const id = (await client.resolveInboxItem(args[0])).envelope.id;
+      await client.ack(id);
+      out(json, { ok: true, id }, `acked ${id}`);
       return;
     }
 
     case "forward": {
-      const [id, to] = args;
-      if (!id || !to) fail("usage: forward <id> <to>");
-      const item = await client.inboxItem(id);
-      if (!item) fail(`no inbox item with id ${id}`);
+      const [ref, to] = args;
+      if (!ref || !to) fail("usage: forward <id> <to>");
+      const item = await client.resolveInboxItem(ref);
+      const id = item.envelope.id;
       const verified = (await verifiedReplies(client, [item])).has(id);
       const blocked = forwardBlockReason(item, loadDecisions(await client.getUser()).get(id), verified);
       if (blocked) fail(blocked);
@@ -170,8 +232,9 @@ async function main() {
 
     case "approve":
     case "decline": {
-      const [id, ...rest] = args;
-      if (!id) fail(`usage: ${cmd} <id> ${cmd === "decline" ? "[reason]" : "[--note TEXT]"}`);
+      const [ref, ...rest] = args;
+      if (!ref) fail(`usage: ${cmd} <id> ${cmd === "decline" ? "[reason]" : "[--note TEXT]"}`);
+      const id = (await client.resolveInboxItem(ref)).envelope.id;
       const reason = cmd === "decline" ? rest.join(" ") || str(flags, "reason") : str(flags, "note");
       const { record, item, reply_error } = await decide(client, id, cmd === "approve" ? "approved" : "declined", { reason, from_agent: str(flags, "from") });
       const who = item.envelope.from;

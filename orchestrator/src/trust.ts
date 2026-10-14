@@ -139,6 +139,35 @@ export async function decide(
   return { record, item, reply_error };
 }
 
+/**
+ * `agentlink reply` on a still-pending remote request is the local orchestrator deciding it, so record an approval
+ * whose reply is the result just sent. Returns null when nothing needed recording (local item, already decided,
+ * verified reply, or context notice).
+ */
+export function recordReplyDecision(
+  user: string,
+  item: InboxItem,
+  replyId: string,
+  opts: { verifiedReply: boolean; via?: "cli" | "mcp" },
+): DecisionRecord | null {
+  const e = item.envelope;
+  if (!isUntrusted(item)) return null;
+  if (approvalState(e, loadDecisions(user).get(e.id), opts.verifiedReply) !== "pending") return null;
+  const record: DecisionRecord = {
+    id: e.id,
+    decision: "approved",
+    reason: "answered with agentlink reply",
+    by: user,
+    at: new Date().toISOString(),
+    request: { from: e.from, to: e.to, type: e.type, hops: e.hops },
+    reply_id: replyId,
+    via: opts.via ?? "cli",
+  };
+  saveDecision(user, record);
+  logLine(user, "approval.approved", { id: e.id, from: e.from, to: e.to, type: e.type, hops: e.hops, reply_id: replyId, reason: record.reason });
+  return record;
+}
+
 function agentOf(addr: string): string | null {
   const a = addr.split("/")[1];
   return a && a !== "*" ? a : null;
@@ -206,9 +235,9 @@ export async function verifiedReplies(client: DaemonClient, items: InboxItem[]):
   return new Set(candidates.filter((i) => sent.has(i.envelope.reply_to!)).map((i) => i.envelope.id));
 }
 
-type ApprovalState = "approved" | "declined" | "reply" | "notice" | "pending";
+export type ApprovalState = "approved" | "declined" | "reply" | "notice" | "pending";
 
-function approvalState(e: Envelope, decision: DecisionRecord | undefined, verifiedReply: boolean): ApprovalState {
+export function approvalState(e: Envelope, decision: DecisionRecord | undefined, verifiedReply: boolean): ApprovalState {
   if (decision) return decision.decision;
   if (verifiedReply) return "reply";
   if (e.type === "context_update") return "notice";

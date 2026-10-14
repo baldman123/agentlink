@@ -278,6 +278,22 @@ export class DaemonClient {
     return all.find((m) => m.envelope.id === id) ?? null;
   }
 
+  /**
+   * Resolve a full id or a unique prefix (at least 4 chars, e.g. the 8-char id the bridge pastes) to an inbox item.
+   * Throws when nothing or more than one item matches.
+   */
+  async resolveInboxItem(idOrPrefix: string): Promise<InboxItem> {
+    const want = idOrPrefix.trim().toLowerCase();
+    if (want.length < 4) throw new Error(`id prefix "${idOrPrefix}" is too short (use at least 4 characters)`);
+    const all = await this.inbox({ limit: 1000 });
+    const exact = all.find((m) => m.envelope.id === want);
+    if (exact) return exact;
+    const hits = all.filter((m) => m.envelope.id.startsWith(want));
+    if (hits.length === 1) return hits[0];
+    if (!hits.length) throw new Error(`no inbox item with id or prefix ${idOrPrefix}`);
+    throw new Error(`id prefix ${idOrPrefix} is ambiguous: ${hits.map((h) => h.envelope.id).join(", ")}`);
+  }
+
   private async noteReceived(m: InboxItem) {
     if (this.seenReceived.has(m.envelope.id)) return;
     this.seenReceived.add(m.envelope.id);
