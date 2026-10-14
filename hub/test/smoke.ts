@@ -104,6 +104,10 @@ try {
     check((await silent.waitClose(5000)) === 4001, "no hello within timeout -> close 4001");
     const health = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json());
     check(health.ok && health.hub_name === "smoke", "GET /api/health open without token");
+    const landing = await fetch(`http://127.0.0.1:${port}/`);
+    const html = await landing.text();
+    check(landing.status === 200 && (landing.headers.get("content-type") ?? "").startsWith("text/html"), "GET / -> 200 text/html without token");
+    check(html.includes("agentlink hub · smoke") && html.includes("not the app") && !html.includes(TOKEN), "landing page names the hub, explains itself, never shows the token");
     const noAuth = await fetch(`http://127.0.0.1:${port}/api/sessions`);
     check(noAuth.status === 401, "REST without token -> 401");
   }

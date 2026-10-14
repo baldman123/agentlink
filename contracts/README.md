@@ -27,6 +27,6 @@ UI: React + Vite. npm workspaces at the repo root.
 
 ## Ports for the one-machine test
 
-hub 7700 · alex daemon 7701 · sam daemon 7702 · UI dev server 5173 (`?daemon=7701` or `?daemon=7702` picks the user).
+hub 7700 · alex daemon 7701 · sam daemon 7702 · UI dev server 127.0.0.1:7780 (`?daemon=7701` or `?daemon=7702` picks the user).
 
 Contract changes go through the orchestrator (`c4 ask`). Don't edit files in this folder.

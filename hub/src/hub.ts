@@ -420,6 +420,10 @@ export class Hub {
   }
 
   // -------------------------------------------------------------------- REST
+  private landingPage(): string {
+    return renderLanding(this.opts.hubName, this.daemons.size);
+  }
+
   private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
@@ -434,6 +438,10 @@ export class Hub {
       }
     };
     if (req.method === "OPTIONS") return send(204);
+    if (path === "/" && (req.method === "GET" || req.method === "HEAD")) {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      return void res.end(req.method === "HEAD" ? undefined : this.landingPage());
+    }
     if (!path.startsWith("/api/")) return send(404, { error: "not_found" });
     if (path === "/api/health" && req.method === "GET") {
       return send(200, { ok: true, hub_id: this.hubId, hub_name: this.opts.hubName, protocol: PROTOCOL_VERSION });
@@ -493,6 +501,37 @@ function tokenMatches(given: unknown, expected: string): boolean {
   if (typeof given !== "string") return false;
   const h = (v: string) => createHash("sha256").update(v).digest();
   return timingSafeEqual(h(given), h(expected));
+}
+
+const escapeHtml = (s: string) =>
+  s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+
+/** Public page for someone who opens the hub URL in a browser. No token, no session details. */
+function renderLanding(hubName: string, connectedUsers: number): string {
+  const name = escapeHtml(hubName);
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentlink hub · ${name}</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111418; color: #d8dde3;
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; padding: 16px; box-sizing: border-box; }
+  main { max-width: 560px; width: 100%; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; color: #f2f4f7; }
+  .meta { color: #8b95a1; font-size: 14px; margin: 0 0 24px; }
+  .note { background: #1a1f25; border: 1px solid #2a313a; border-radius: 8px; padding: 16px 18px; }
+  .note p { margin: 0 0 8px; } .note p:last-child { margin: 0; }
+  code { font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; color: #9ecbff; word-break: break-all; }
+</style></head>
+<body><main>
+  <h1>agentlink hub · ${name}</h1>
+  <p class="meta">protocol v${PROTOCOL_VERSION} · ${connectedUsers} user${connectedUsers === 1 ? "" : "s"} connected</p>
+  <div class="note">
+    <p><strong>This is the hub, not the app.</strong></p>
+    <p>Open the app on your own laptop at <code>http://127.0.0.1:7780/?daemon=&lt;your daemon port&gt;</code> after starting your daemon pointed at this hub.</p>
+  </div>
+</main></body></html>
+`;
 }
 
 function clampInt(v: string | null, def: number, min: number, max: number): number {
