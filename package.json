@@ -1,0 +1,12 @@
+{
+  "name": "agentlink",
+  "private": true,
+  "type": "module",
+  "workspaces": ["hub", "daemon", "orchestrator", "ui"],
+  "scripts": {
+    "hub": "npm run start -w hub",
+    "daemon": "npm run start -w daemon",
+    "ui": "npm run dev -w ui"
+  },
+  "engines": { "node": ">=22.5" }
+}
