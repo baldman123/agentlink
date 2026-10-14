@@ -133,6 +133,9 @@ export type ClientFrame =
   | { op: "session.upsert"; session: Pick<Session, "agent" | "kind" | "status" | "task"> }
   | { op: "session.remove"; agent: string }
   | { op: "heartbeat"; agents: string[] } // every HEARTBEAT_INTERVAL_MS
+  | { op: "screen"; screen: ScreenUpdate } // daemon only; latest-wins, never queued (see screens.md)
+  // ui only
+  | { op: "screens.subscribe"; addresses: Address[] | "*" } // replaces any earlier subscription; [] = none
   | { op: "ping" };
 
 export type ServerFrame =
@@ -144,8 +147,25 @@ export type ServerFrame =
   | { op: "deliver"; envelope: Envelope } // recipient must answer { op:"ack", id }
   // both roles
   | { op: "event"; frame: EventFrame }
+  // ui only, for subscribed addresses: the current screen right after subscribing, then every change
+  | { op: "screen"; address: Address; screen: ScreenUpdate; at: string }
+  | { op: "screen.gone"; address: Address }
   | { op: "error"; code: "auth_failed" | "bad_frame" | "protocol"; message: string }
   | { op: "pong" };
+
+// ---------------------------------------------------------------------------
+// Terminal screens (see screens.md). Opt-in per laptop: AGENTLINK_SHARE_SCREENS=1 on the bridge.
+// ---------------------------------------------------------------------------
+export const SCREEN_MAX_LINES = 120;
+export const SCREEN_MAX_BYTES = 64 * 1024;
+export interface ScreenUpdate {
+  agent: string; // agent name; the hub derives the address from the daemon's user
+  text: string; // last <= SCREEN_MAX_LINES lines, ANSI SGR colour codes only (ESC [ ... m), already redacted
+  cols: number;
+  rows: number;
+  busy: boolean; // the Claude in the pane is working
+}
+export interface ScreenInfo { address: Address; cols: number; rows: number; at: string }
 
 // Close codes: 4001 auth failed / no hello, 4002 protocol mismatch, 4003 replaced by a newer
 // connection for the same user+role (daemon).
