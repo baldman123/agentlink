@@ -16,6 +16,7 @@ import {
 
 const token = process.env.AGENTLINK_TOKEN ?? "";
 const port = Number(process.env.FAKE_HUB_PORT ?? 7790);
+const HUB_ID = process.env.FAKE_HUB_ID ?? "fake";
 if (!token) throw new Error("AGENTLINK_TOKEN required");
 
 const daemons = new Map<string, WebSocket>();
@@ -38,7 +39,7 @@ function deliver(user: string, env: Envelope) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
-  if (url.pathname === "/api/health") return res.end(JSON.stringify({ ok: true, hub_id: "fake", hub_name: "fake-hub", protocol: 1 }));
+  if (url.pathname === "/api/health") return res.end(JSON.stringify({ ok: true, hub_id: HUB_ID, hub_name: "fake-hub", protocol: 1 }));
   if (req.headers.authorization !== `Bearer ${token}`) {
     res.writeHead(401).end(JSON.stringify({ error: "unauthorized" }));
     return;
@@ -88,7 +89,7 @@ wss.on("connection", (ws) => {
       daemons.get(user)?.close(4003, "replaced");
       daemons.set(user, ws);
       flog("hello", { user, since_seq: f.since_seq });
-      out(ws, { op: "welcome", hub_id: "fake", hub_name: "fake-hub", server_time: new Date().toISOString(), protocol: PROTOCOL_VERSION });
+      out(ws, { op: "welcome", hub_id: HUB_ID, hub_name: "fake-hub", server_time: new Date().toISOString(), protocol: PROTOCOL_VERSION });
       out(ws, { op: "snapshot", users: [], context: [...context.values()], last_seq: seq });
       for (const env of pending.get(user) ?? []) out(ws, { op: "deliver", envelope: env });
       return;

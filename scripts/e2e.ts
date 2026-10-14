@@ -86,8 +86,31 @@ async function cli(user: User, args: string[]): Promise<{ code: number; stdout: 
 }
 async function cliInbox(user: User, agent: string): Promise<InboxItem[]> {
   const r = await cli(user, ["--json", "inbox", "--agent", agent, "--all"]);
-  if (r.code !== 0) throw new Error(`agentlink inbox exited ${r.code}: ${r.stderr.trim()}`);
-  return r.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  if (r.code !== 0) throw new Error(`agentlink inbox exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+  return r.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => normalizeCliItem(JSON.parse(l)));
+}
+
+/** The CLI prints either an InboxItem or a flat, trust-annotated record; map both to InboxItem. */
+function normalizeCliItem(x: Record<string, any>): InboxItem {
+  if (x.envelope) return x as InboxItem;
+  return {
+    envelope: {
+      id: x.id,
+      from: x.from,
+      to: x.to,
+      reply_to: x.reply_to ?? null,
+      hops: x.hops,
+      type: x.type,
+      body: x.untrusted_body ?? x.body,
+      timestamp: x.timestamp,
+    },
+    received_at: x.received_at,
+    handled: x.handled,
+    remote: x.remote,
+  };
 }
 
 function logLines(file: string): Record<string, unknown>[] {

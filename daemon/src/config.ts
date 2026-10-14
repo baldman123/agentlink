@@ -7,6 +7,7 @@ export interface Config {
   hubUrl: string | null; // manual fallback, normalized to http://host:port
   discovery: "mdns" | "manual";
   hubName: string | null; // when set, mDNS accepts only a hub whose TXT name or hub_id equals it
+  repin: boolean; // AGENTLINK_HUB_REPIN=1: accept a hub whose hub_id differs from the pinned one, and re-pin
   port: number;
   dbPath: string;
   logPath: string;
@@ -44,5 +45,6 @@ export function loadConfig(env = process.env): Config {
   const dbPath = path.resolve(env.AGENTLINK_DAEMON_DB ?? `./data/daemon-${user}.sqlite`);
   const logPath = path.resolve(`./logs/daemon-${user}.log`);
   const hubName = env.AGENTLINK_HUB_NAME || null;
-  return { user, token, hubUrl, discovery, hubName, port, dbPath, logPath };
+  const repin = env.AGENTLINK_HUB_REPIN === "1";
+  return { user, token, hubUrl, discovery, hubName, repin, port, dbPath, logPath };
 }

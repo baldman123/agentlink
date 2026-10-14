@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import type { RichBody, StoredMessage } from "../../../contracts/index.ts";
@@ -7,10 +7,22 @@ import { HUMAN_AGENT } from "../../../contracts/index.ts";
 import { bodyOf, clockTime, userColor, userOf } from "../lib.ts";
 import { Addr, Avatar, StatusDot, useApp } from "./bits.tsx";
 
+// Images render as plain links so a remote message can't make the browser fetch arbitrary URLs.
+const MD_COMPONENTS: Components = {
+  img: ({ src, alt }) => {
+    const href = typeof src === "string" ? src : "";
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer">
+        {alt ? `image: ${alt}` : href || "image"}
+      </a>
+    );
+  },
+};
+
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     <div className="md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]} components={MD_COMPONENTS}>
         {text}
       </ReactMarkdown>
     </div>

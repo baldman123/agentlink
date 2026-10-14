@@ -7,6 +7,7 @@ export interface HubTarget {
   url: string; // http://host:port
   via: "mdns" | "manual";
   name: string | null;
+  hubId: string | null; // TXT hub_id for mDNS targets; unknown (null) for the manual URL
 }
 
 const MDNS_WAIT_MS = 5_000;
@@ -71,7 +72,7 @@ export class Discovery extends EventEmitter {
       log("hub.ignored", { url, name: txt.name ?? null, hub_id: txt.hub_id ?? null, want: this.hubName });
       return;
     }
-    const target: HubTarget = { url, via: "mdns", name: txt.name ?? svc.name ?? null };
+    const target: HubTarget = { url, via: "mdns", name: txt.name ?? svc.name ?? null, hubId: txt.hub_id ?? null };
     const key = `${host}:${svc.port}`;
     this.found.delete(key);
     this.found.set(key, target);
@@ -87,10 +88,14 @@ export class Discovery extends EventEmitter {
     this.keyByService.delete(svc.name);
   }
 
-  /** The best current target, waiting up to 5s after startup for mDNS before using the manual URL. */
-  async resolve(): Promise<HubTarget | null> {
-    if (this.mode === "manual") return { url: this.manualUrl!, via: "manual", name: null };
-    const latest = this.latest();
+  /**
+   * The best current target, waiting up to 5s after startup for mDNS before using the manual URL.
+   * With `pinnedId`, a discovered hub advertising that hub_id wins over newer advertisers.
+   */
+  async resolve(pinnedId: string | null = null): Promise<HubTarget | null> {
+    const manual: HubTarget | null = this.manualUrl ? { url: this.manualUrl, via: "manual", name: null, hubId: null } : null;
+    if (this.mode === "manual") return manual;
+    const latest = this.latest(pinnedId);
     if (latest) return latest;
     const remaining = MDNS_WAIT_MS - (Date.now() - this.startedAt);
     if (remaining > 0) {
@@ -107,14 +112,17 @@ export class Discovery extends EventEmitter {
       });
       if (t) return t;
     }
-    if (this.manualUrl) return { url: this.manualUrl, via: "manual", name: null };
-    return null;
+    return manual;
   }
 
-  private latest(): HubTarget | null {
+  private latest(pinnedId: string | null): HubTarget | null {
     let last: HubTarget | null = null;
-    for (const t of this.found.values()) last = t;
-    return last;
+    let pinned: HubTarget | null = null;
+    for (const t of this.found.values()) {
+      last = t;
+      if (pinnedId && t.hubId === pinnedId) pinned = t;
+    }
+    return pinned ?? last;
   }
 }
 

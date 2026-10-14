@@ -36,19 +36,26 @@ function run(name: string, args: string[], cwd: string, env: Record<string, stri
   return p;
 }
 
-function startHub() {
+/** `other` starts a different hub (new hub_id) on the same port, standing in for an impostor. */
+function startHub(other = false) {
   if (REAL) {
     return run("hub", ["src/index.ts"], path.resolve(daemonDir, "../hub"), {
       AGENTLINK_TOKEN: TOKEN,
       AGENTLINK_HUB_PORT: String(HUB_PORT),
-      AGENTLINK_HUB_DB: path.join(tmp, "hub.sqlite"),
+      AGENTLINK_HUB_DB: path.join(tmp, other ? "hub-other.sqlite" : "hub.sqlite"),
+      AGENTLINK_MDNS: "0",
     });
   }
-  return run("hub", ["test/fake-hub.ts"], daemonDir, { AGENTLINK_TOKEN: TOKEN, FAKE_HUB_PORT: String(HUB_PORT) });
+  return run("hub", ["test/fake-hub.ts"], daemonDir, {
+    AGENTLINK_TOKEN: TOKEN,
+    FAKE_HUB_PORT: String(HUB_PORT),
+    FAKE_HUB_ID: other ? "fake-other" : "fake",
+  });
 }
 
-function startDaemon(user: User) {
+function startDaemon(user: User, extraEnv: Record<string, string> = {}) {
   return run(user, [path.join(daemonDir, "src/index.ts")], tmp, {
+    ...extraEnv,
     AGENTLINK_USER: user,
     AGENTLINK_TOKEN: TOKEN,
     AGENTLINK_HUB_URL: `http://127.0.0.1:${HUB_PORT}`,
@@ -213,6 +220,33 @@ async function main() {
   const all = await inbox("sam", "?limit=1000");
   const ids = all.map((m) => m.envelope.id);
   check("inbox dedupe", ids.length === new Set(ids).size, ids);
+
+  // rejection note is logged (fake hub only; it's the one with the reject hook)
+  if (!REAL) {
+    const lines = fs.readFileSync(path.join(tmp, "logs", "daemon-alex.log"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    check(
+      "rejection note logged as msg.received local",
+      lines.some((l) => l.event === "msg.received" && l.local === true && l.reason === "bad_address" && l.from === "alex/agentlink"),
+    );
+  }
+
+  // --- hub_id pin: a different hub on the same address is refused before the token is sent
+  await stop(hub);
+  hub = startHub(true);
+  const alexLog = path.join(tmp, "logs", "daemon-alex.log");
+  const idChanged = await until("hub.id_changed in alex's log", async () =>
+    fs.readFileSync(alexLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.event === "hub.id_changed"),
+  20_000);
+  check("pinned daemon logs hub.id_changed for a new hub_id", idChanged.got_hub_id !== idChanged.expected_hub_id, idChanged);
+  check("mismatch caught at precheck, before the token was sent", idChanged.stage === "precheck", idChanged);
+  await new Promise((r) => setTimeout(r, 1500));
+  check("pinned daemon stays offline", (await health("alex")).hub.state === "offline");
+
+  await stop(alex);
+  alex = startDaemon("alex", { AGENTLINK_HUB_REPIN: "1" });
+  await connected("alex");
+  const repinned = fs.readFileSync(alexLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).some((l) => l.event === "hub.repinned");
+  check("AGENTLINK_HUB_REPIN=1 re-pins and connects", repinned);
 }
 
 main()

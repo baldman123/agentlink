@@ -47,6 +47,7 @@ export class HubLink extends EventEmitter {
   private lastFrameAt = 0;
   private stopped = false;
   private connecting = false;
+  private idMismatch = false; // offline because the hub's id differs from the pinned one
 
   constructor(
     private cfg: Config,
@@ -54,9 +55,11 @@ export class HubLink extends EventEmitter {
     private discovery: Discovery,
   ) {
     super();
-    discovery.on("up", () => {
+    discovery.on("up", (t: HubTarget) => {
       // A hub showed up on mDNS while we were waiting to retry: try now instead of after the backoff.
-      if (this.state === "connecting" || this.state === "reconnecting") {
+      // While offline over a hub_id mismatch, only the pinned hub coming back cuts the wait short.
+      const pinnedBack = this.idMismatch && t.hubId !== null && t.hubId === this.pinnedId();
+      if (this.state === "connecting" || this.state === "reconnecting" || pinnedBack) {
         if (this.retryTimer && !this.ws) {
           clearTimeout(this.retryTimer);
           this.retryTimer = null;
@@ -102,9 +105,14 @@ export class HubLink extends EventEmitter {
     this.retryTimer = null;
     if (this.state !== "offline") this.setState(this.everConnected ? "reconnecting" : "connecting");
 
+    const pin = this.pinnedId();
     let target: HubTarget | null = null;
+    let advertisedId: string | null = null;
     try {
-      target = await this.discovery.resolve();
+      target = await this.discovery.resolve(pin);
+      // Before the token leaves this machine, ask the hub who it is: TXT hub_id for mDNS, and the
+      // unauthenticated /api/health for both mDNS and the manual URL.
+      if (target && pin) advertisedId = target.hubId ?? (await this.probeHubId(target.url));
     } finally {
       this.connecting = false;
     }
@@ -116,6 +124,10 @@ export class HubLink extends EventEmitter {
       return;
     }
     this.target = target;
+    if (advertisedId !== null && !this.checkPin(advertisedId, "precheck")) {
+      this.goOfflineForMismatch();
+      return;
+    }
 
     const wsUrl = target.url.replace(/^http/, "ws") + "/ws";
     const ws = new WebSocket(wsUrl, { handshakeTimeout: 5_000 });
@@ -166,6 +178,11 @@ export class HubLink extends EventEmitter {
     log("hub.disconnected", { url: this.target?.url, code, reason, was_connected: wasConnected });
     if (this.stopped) return;
 
+    if (this.idMismatch) {
+      this.goOfflineForMismatch();
+      return;
+    }
+
     if (code === 4001 || code === 4002 || code === 4003) {
       // Auth failure, protocol mismatch, or another daemon took over this user: retry slowly.
       log("hub.offline", {
@@ -180,6 +197,65 @@ export class HubLink extends EventEmitter {
     this.setState(this.everConnected ? "reconnecting" : "connecting");
     this.discovery.refresh();
     this.scheduleRetry();
+  }
+
+  // ------------------------------------------------------------------ hub_id pin
+
+  private pinnedId(): string | null {
+    return this.store.getKv("pinned_hub_id");
+  }
+
+  /** GET /api/health (no auth) for the hub's id; null if it can't be read. */
+  private async probeHubId(url: string): Promise<string | null> {
+    try {
+      const res = await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(3_000) });
+      const body = (await res.json()) as { hub_id?: unknown };
+      return typeof body.hub_id === "string" ? body.hub_id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Compare a hub's id with the pinned one. Pins on first sight. Returns false (and sets idMismatch)
+   * when it differs and AGENTLINK_HUB_REPIN is not set.
+   */
+  private checkPin(gotId: string, stage: "precheck" | "welcome"): boolean {
+    const pin = this.pinnedId();
+    if (pin === null) {
+      this.store.setKv("pinned_hub_id", gotId);
+      log("hub.pinned", { hub_id: gotId, url: this.target?.url, via: this.target?.via });
+      return true;
+    }
+    if (gotId === pin) {
+      this.idMismatch = false;
+      return true;
+    }
+    if (this.cfg.repin) {
+      this.store.setKv("pinned_hub_id", gotId);
+      log("hub.repinned", { old_hub_id: pin, hub_id: gotId, url: this.target?.url, via: this.target?.via, stage });
+      this.idMismatch = false;
+      return true;
+    }
+    this.idMismatch = true;
+    log("hub.id_changed", {
+      level: "warn",
+      expected_hub_id: pin,
+      got_hub_id: gotId,
+      url: this.target?.url,
+      via: this.target?.via,
+      stage,
+      detail:
+        "this hub is not the one this daemon pinned; staying offline. If the hub was really replaced, restart with AGENTLINK_HUB_REPIN=1",
+    });
+    return false;
+  }
+
+  private goOfflineForMismatch() {
+    this.setState("offline");
+    this.attempt = 0;
+    this.discovery.refresh();
+    this.retryTimer = setTimeout(() => void this.connect(), AUTH_RETRY_MS);
   }
 
   private scheduleRetry() {
@@ -199,6 +275,8 @@ export class HubLink extends EventEmitter {
   // ------------------------------------------------------------------ frames
 
   private onFrame(frame: ServerFrame) {
+    // After a hub_id mismatch nothing from that socket is stored or acked while it closes.
+    if (this.idMismatch && frame.op !== "welcome") return;
     switch (frame.op) {
       case "welcome":
         return this.onWelcome(frame);
@@ -228,6 +306,10 @@ export class HubLink extends EventEmitter {
   private onWelcome(frame: Extract<ServerFrame, { op: "welcome" }>) {
     if (this.welcomeTimer) clearTimeout(this.welcomeTimer);
     this.welcomeTimer = null;
+    if (!this.checkPin(frame.hub_id, "welcome")) {
+      this.ws?.close(1000, "hub_id mismatch"); // onClose sees idMismatch and goes offline
+      return;
+    }
     this.hubName = frame.hub_name;
     this.attempt = 0;
     this.everConnected = true;
@@ -285,6 +367,7 @@ export class HubLink extends EventEmitter {
       timestamp: new Date().toISOString(),
     };
     const stored = this.store.inboxInsert(note);
+    logMsg("msg.received", note, { local: true, reason });
     if (stored) this.emit("inbox", stored);
   }
 
