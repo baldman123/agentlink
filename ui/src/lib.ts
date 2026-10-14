@@ -108,5 +108,5 @@ export function saveStorage(key: string, v: unknown) {
 }
 
 export const params = new URLSearchParams(location.search);
-export const DAEMON_PORT = Number(params.get("daemon") || 7701);
+export const DAEMON_PORT = Number(/\d{2,5}/.exec(params.get("daemon") ?? "")?.[0] ?? 7701);
 export const MOCK = params.get("mock") === "1";
