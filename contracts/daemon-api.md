@@ -14,8 +14,22 @@ CORS: allow `http://localhost:*` and `http://127.0.0.1:*` origins only (the UI c
 | `AGENTLINK_HUB_URL` | optional manual fallback, e.g. `http://192.168.1.20:7700`. Used when mDNS finds nothing within 5s, or immediately if `AGENTLINK_DISCOVERY=manual` |
 | `AGENTLINK_HUB_NAME` | optional; when set, mDNS only accepts a hub whose TXT `name` or `hub_id` equals it (lets several hubs share a network). Discovered hubs are keyed by host:port |
 | `AGENTLINK_HUB_REPIN` | `1` = accept a hub whose hub_id differs from the pinned one and re-pin. By default the daemon pins hub_id on first welcome and stays offline on mismatch (`hub.id_changed`) |
+| `AGENTLINK_HUB_ID` | the hub to join, by its permanent id (from the host's `team-up` output or its hub page). Set by `team-up --join`. When set, the daemon pins it from the start and connects to nothing else |
+| `AGENTLINK_SCAN` | default `1`: when mDNS and the last known address fail, probe the local subnet for the hub (see Discovery). `0` disables it |
 | `AGENTLINK_DAEMON_PORT` | default 7701 |
 | `AGENTLINK_DAEMON_DB` | default `./data/daemon-<user>.sqlite` |
+
+## Discovery (finding the pinned hub when its IP changes)
+
+The hub's identity is its `hub_id`, never its IP. With a pin (`AGENTLINK_HUB_ID`, or the id pinned at the first welcome), try these in order and stop at the first match:
+1. **mDNS**: a `_agentlink._tcp` service whose TXT `hub_id` equals the pin.
+2. **Last known**: every address this daemon has connected to successfully (stored in its db, newest first, at most 5).
+3. **Scan** (if `AGENTLINK_SCAN` is on): every host in each private IPv4 subnet this laptop is on (10/8, 172.16/12, 192.168/16, capped at the /24 around this laptop's address), on port 7700 (or the last known hub port), with `GET /api/health` (no auth, 400ms timeout, 32 at a time). Accept only a matching `hub_id`. Repeat every 30s while not connected.
+4. **Manual** `AGENTLINK_HUB_URL`, verified the same way.
+
+The token is sent only after `GET /api/health` at that address returns the pinned `hub_id` (and again at welcome). Restart discovery right away when the laptop's network interfaces change (polled every 5s) or the connection drops. Log `hub.found {via, url}` and `hub.search {stage}`.
+`DaemonHealth.hub` reports `via`, `hub_id` and `searching` (true while looking).
+Tests may set `AGENTLINK_SCAN_HOSTS` (comma-separated host list, which replaces the subnet).
 
 ## Hub link
 

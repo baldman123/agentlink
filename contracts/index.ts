@@ -178,7 +178,7 @@ export type HubConnState = "connected" | "connecting" | "reconnecting" | "offlin
 export interface DaemonHealth {
   ok: true;
   user: string;
-  hub: { state: HubConnState; url: string | null; via: "mdns" | "manual" | null; hub_name: string | null };
+  hub: { state: HubConnState; url: string | null; via: "mdns" | "last_known" | "scan" | "manual" | null; hub_name: string | null; hub_id: string | null; searching: boolean };
   outbox_depth: number;
   inbox_unhandled: number;
 }
