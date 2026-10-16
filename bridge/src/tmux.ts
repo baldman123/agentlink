@@ -40,10 +40,20 @@ export class Tmux {
       if (i === 0) onWait?.();
       await sleep(1_000);
     }
-    if (!(await this.run(["set-buffer", "-b", bufferName, "--", text])).ok) return false;
-    if (!(await this.run(["paste-buffer", "-p", "-d", "-b", bufferName, "-t", pane])).ok) return false;
+    return (await this.type(pane, text, bufferName, true)) === null;
+  }
+
+  /** Bracketed paste through a named buffer, then (if submit) a short pause and Enter. Returns null, or why it failed. */
+  async type(pane: string, text: string, bufferName: string, submit: boolean): Promise<string | null> {
+    if (!(await this.run(["set-buffer", "-b", bufferName, "--", text])).ok) return "set-buffer";
+    if (!(await this.run(["paste-buffer", "-p", "-d", "-b", bufferName, "-t", pane])).ok) return "paste-buffer";
+    if (!submit) return null;
     await sleep(400);
-    return (await this.run(["send-keys", "-t", pane, "Enter"])).ok;
+    return (await this.run(["send-keys", "-t", pane, "Enter"])).ok ? null : "send-keys";
+  }
+
+  async setOption(pane: string, name: string, value: string): Promise<boolean> {
+    return (await this.run(["set", "-p", "-t", pane, name, value])).ok;
   }
 }
 

@@ -105,6 +105,16 @@ export function makeScreenSim(getSession: (address: string) => Session | undefin
   }
 
   return {
+    /** What the bridge typing into the pane looks like: /clear wipes the scrollback, anything else is a prompt line. */
+    typed(address: string, text: string) {
+      const s = sim(address);
+      if (text.trim() === "/clear") {
+        s.lines = [`${GREY}>${R} /clear`, `  ${GREY}⎿${R}  ${DIM}(no content)${R}`, ""];
+        s.cookedFor = undefined;
+      } else {
+        s.lines.push(...text.split("\n").map((l, i) => (i === 0 ? `${GREY}>${R} ${l}` : `  ${l}`)), "");
+      }
+    },
     /** Advances one agent by a tick (call ~1/s); returns its new screen. */
     tick(address: string): ScreenUpdate {
       const session = getSession(address);

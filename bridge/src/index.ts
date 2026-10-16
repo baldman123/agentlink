@@ -2,6 +2,7 @@
 import { loadConfig, loadToken } from "./config.ts";
 import { Daemon } from "./daemon.ts";
 import { Inbound } from "./inbound.ts";
+import { PaneInput } from "./input.ts";
 import { initLog, log } from "./log.ts";
 import { ScreenShare } from "./screens.ts";
 import { Store } from "./store.ts";
@@ -31,6 +32,10 @@ log("bridge.started", {
 sync.start();
 inbound.start();
 
+// The local UI's command bar (contracts/input.md); the daemon only accepts it from the local UI origin.
+const input = new PaneInput(cfg, tmux, daemon, () => void sync.tick());
+input.start();
+
 // Opt-in only (contracts/screens.md). Without AGENTLINK_SHARE_SCREENS=1 no screen ever leaves this laptop.
 const screens = cfg.shareScreens ? new ScreenShare(cfg, tmux, daemon, () => sync.team, loadToken()) : null;
 screens?.start();
@@ -41,6 +46,7 @@ async function shutdown(sig: string) {
   stopping = true;
   log("bridge.stopping", { signal: sig });
   inbound.stop();
+  input.stop();
   sync.stop();
   await Promise.race([screens?.stop(), new Promise((r) => setTimeout(r, 1_000))]);
   await Promise.race([sync.markOffline(), new Promise((r) => setTimeout(r, 2_000))]);

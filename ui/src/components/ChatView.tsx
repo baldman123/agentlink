@@ -46,7 +46,12 @@ export function useHistory(address: Address | null) {
 
 export function MessageList({ address, compact, onReply }: { address: Address; compact?: boolean; onReply?(m: StoredMessage): void }) {
   const { state } = useApp();
-  const { messages, status, loadEarlier } = useHistory(address);
+  const { messages: all, status, loadEarlier } = useHistory(address);
+  // local-only history reset (Reset chats → "also clear chat history in this browser")
+  const [showHidden, setShowHidden] = useState(false);
+  const cutoff = state.historyCutoff;
+  const hiddenCount = cutoff && !showHidden ? all.filter((m) => m.timestamp < cutoff).length : 0;
+  const messages = hiddenCount ? all.filter((m) => m.timestamp >= cutoff!) : all;
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
@@ -65,7 +70,15 @@ export function MessageList({ address, compact, onReply }: { address: Address; c
 
   return (
     <div className="msglist" ref={scroller} onScroll={onScroll} aria-live="polite">
-      {status === "more" && (
+      {hiddenCount > 0 && (
+        <div className="cutoff">
+          <span>
+            {hiddenCount} earlier {hiddenCount === 1 ? "message" : "messages"} hidden in this browser since you reset chats ·{" "}
+          </span>
+          <button className="link" onClick={() => setShowHidden(true)}>Show them</button>
+        </div>
+      )}
+      {status === "more" && !hiddenCount && (
         <button className="load-earlier" onClick={loadEarlier}>
           Load earlier messages
         </button>
@@ -76,35 +89,50 @@ export function MessageList({ address, compact, onReply }: { address: Address; c
         </div>
       )}
       {status === "error" && <div className="empty">Couldn't load history from the hub. New messages still appear live.</div>}
-      {(status === "ready" || status === "more") && messages.length === 0 && (
+      {(status === "ready" || status === "more") && messages.length === 0 && !hiddenCount && (
         <div className="empty">
           <strong>No messages yet.</strong>
           <span>{compact ? "This session hasn't sent or received anything." : "Send a task or a note below to get things moving."}</span>
         </div>
       )}
-      {groupRuns(messages).map((run) =>
-        run.length >= FOLD_MIN && isSystem(run[0]) ? (
-          <SysFold key={run[0].id} run={run} />
-        ) : (
-          run.map((m) => {
-            const i = messages.indexOf(m);
-            const prev = messages[i - 1];
-            const continued = !!prev && prev.from === m.from && prev.to === m.to && !isSystem(prev) && Date.parse(m.timestamp) - Date.parse(prev.timestamp) < GROUP_MS;
-            return (
-              <MessageItem
-                key={m.id}
-                m={m}
-                continued={continued}
-                compact={compact}
-                onReply={onReply}
-                replyTo={m.reply_to ? state.messages[m.reply_to] : undefined}
-              />
-            );
-          })
-        ),
+      {cutoff && showHidden ? (
+        <>
+          {renderList(messages.filter((m) => m.timestamp < cutoff))}
+          <div className="cutoff cutoff-line" role="separator">
+            <span>chats reset here, {clockTime(cutoff)}</span>
+            <button className="link" onClick={() => setShowHidden(false)}>Hide earlier</button>
+          </div>
+          {renderList(messages.filter((m) => m.timestamp >= cutoff))}
+        </>
+      ) : (
+        renderList(messages)
       )}
     </div>
   );
+
+  function renderList(ms: StoredMessage[]) {
+    return groupRuns(ms).map((run) =>
+      run.length >= FOLD_MIN && isSystem(run[0]) ? (
+        <SysFold key={run[0].id} run={run} />
+      ) : (
+        run.map((m) => {
+          const i = ms.indexOf(m);
+          const prev = ms[i - 1];
+          const continued = !!prev && prev.from === m.from && prev.to === m.to && !isSystem(prev) && Date.parse(m.timestamp) - Date.parse(prev.timestamp) < GROUP_MS;
+          return (
+            <MessageItem
+              key={m.id}
+              m={m}
+              continued={continued}
+              compact={compact}
+              onReply={onReply}
+              replyTo={m.reply_to ? state.messages[m.reply_to] : undefined}
+            />
+          );
+        })
+      ),
+    );
+  }
 }
 
 const FOLD_MIN = 3;

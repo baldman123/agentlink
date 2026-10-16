@@ -1,6 +1,6 @@
 import { PROTOCOL_VERSION } from "../../contracts/index.ts";
 import type { Address, ClientFrame, ContextEntry, ServerFrame, StoredMessage, UiBootstrap } from "../../contracts/index.ts";
-import type { ConnectHandlers, ContextPutResult, MessageQuery, Transport } from "./lib.ts";
+import type { ConnectHandlers, ContextPutResult, MessageQuery, PaneInputResponse, PaneInputStatus, Transport } from "./lib.ts";
 import { screenStore } from "./screens.ts";
 
 const PING_MS = 15_000;
@@ -155,6 +155,35 @@ export function realTransport(daemonPort: number): Transport {
       if (r.status === 503) return { ok: false, error: "Hub is offline. Your edit is still here; save again once it reconnects." };
       if (!r.ok) return { ok: false, error: j.detail || j.error || `Save failed (${r.status})` };
       return { ok: true, entry: j as ContextEntry };
+    },
+    async paneInput(req): Promise<PaneInputResponse> {
+      let r: Response;
+      try {
+        r = await fetch(`${daemon}/v1/panes/input`, {
+          method: "POST",
+          // the custom header forces a CORS preflight; the daemon also checks Origin (input.md)
+          headers: { "Content-Type": "application/json", "X-Agentlink-Input": "1" },
+          body: JSON.stringify(req),
+        });
+      } catch {
+        return { ok: false, kind: "network", message: `Can't reach the daemon on :${daemonPort}.` };
+      }
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 202 && j.id) return { ok: true, id: j.id };
+      if (r.status === 503)
+        return { ok: false, kind: "no_bridge", message: "No bridge is connected on this laptop, so nothing can be typed into the panes. Start it with scripts/team-up.sh, then try again." };
+      if (r.status === 403)
+        return { ok: false, kind: "forbidden", message: `The daemon refused input from this page (it only accepts the agentlink UI origin, and this page is ${location.origin}).` };
+      return { ok: false, kind: "bad_request", message: j.detail || j.error || `The daemon answered ${r.status}.` };
+    },
+    async paneInputStatus(id) {
+      try {
+        const r = await fetch(`${daemon}/v1/panes/input/${encodeURIComponent(id)}`);
+        if (!r.ok) return null;
+        return (await r.json()) as PaneInputStatus;
+      } catch {
+        return null;
+      }
     },
     subscribeScreens(addresses) {
       const next = [...new Set(addresses)].sort();

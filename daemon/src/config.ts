@@ -11,6 +11,7 @@ export interface Config {
   port: number;
   dbPath: string;
   logPath: string;
+  uiOrigin: string; // the only Origin allowed to POST /v1/panes/input (contracts/input.md)
 }
 
 const USER_RE = /^[a-z0-9_-]{1,32}$/;
@@ -46,5 +47,7 @@ export function loadConfig(env = process.env): Config {
   const logPath = path.resolve(`./logs/daemon-${user}.log`);
   const hubName = env.AGENTLINK_HUB_NAME || null;
   const repin = env.AGENTLINK_HUB_REPIN === "1";
-  return { user, token, hubUrl, discovery, hubName, repin, port, dbPath, logPath };
+  const uiOrigin = env.AGENTLINK_UI_ORIGIN || "http://127.0.0.1:7780";
+  if (!/^https?:\/\/[^/]+$/.test(uiOrigin)) fail("AGENTLINK_UI_ORIGIN must be an origin like http://127.0.0.1:7780");
+  return { user, token, hubUrl, discovery, hubName, repin, port, dbPath, logPath, uiOrigin };
 }

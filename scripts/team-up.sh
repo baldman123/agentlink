@@ -22,6 +22,8 @@
 #   --daemon-port N      [AGENTLINK_DAEMON_PORT] default 7701
 #   --hub-port N         [AGENTLINK_HUB_PORT] default 7700 (with --host-hub)
 #   --no-ui              don't start the UI
+#                        [AGENTLINK_UI_ORIGIN] the one web origin allowed to type into the panes through
+#                        the command bar; default http://127.0.0.1:7780 (the UI this script starts)
 #   --restart-bridge     restart only the c4 bridge (to pick up a new bridge version or a changed
 #                        --direct / --share-screens). Hub, daemon and UI are left alone. Settings not
 #                        given as flags or env come from the existing data/local.env.
@@ -36,6 +38,8 @@ PIDFILE="$DATA/team.pids"
 LOGS="$DATA/logs"
 TSX_LOADER="file://$ROOT/node_modules/tsx/dist/loader.mjs"
 UI_PORT=7780
+# The only web origin the daemon lets type into the panes (the command bar); defaults to this script's UI.
+UI_ORIGIN="${AGENTLINK_UI_ORIGIN:-http://127.0.0.1:$UI_PORT}"
 
 USER_NAME="${AGENTLINK_USER:-}"
 HUB_URL="${AGENTLINK_HUB_URL:-}"
@@ -65,7 +69,7 @@ while [[ $# -gt 0 ]]; do
     --hub-port) HUB_PORT="${2:-}"; shift 2 ;;
     --no-ui) START_UI=0; shift ;;
     --restart-bridge) RESTART_BRIDGE=1; shift ;;
-    -h | --help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
@@ -216,8 +220,9 @@ elif pid="$(live_pid daemon)" && [[ -n "$pid" ]]; then
 elif listening "$DAEMON_PORT"; then
   die "port $DAEMON_PORT is taken by another program (another daemon?); stop it or use --daemon-port"
 else
+  # The command bar (contracts/input.md): only this origin may type into the panes.
   daemon_env=(AGENTLINK_USER="$USER_NAME" AGENTLINK_TOKEN="$TOKEN" AGENTLINK_DAEMON_PORT="$DAEMON_PORT"
-    AGENTLINK_DAEMON_DB="$DATA/daemon-$USER_NAME.sqlite")
+    AGENTLINK_DAEMON_DB="$DATA/daemon-$USER_NAME.sqlite" AGENTLINK_UI_ORIGIN="$UI_ORIGIN")
   if [[ -n "$HUB_URL" ]]; then daemon_env+=(AGENTLINK_HUB_URL="$HUB_URL" AGENTLINK_DISCOVERY=manual); fi
   launch daemon "$DATA" env -u AGENTLINK_HUB_URL -u AGENTLINK_DISCOVERY "${daemon_env[@]}" \
     node --import "$TSX_LOADER" "$ROOT/daemon/src/index.ts"

@@ -147,6 +147,43 @@ async function uiSocket(subscribe: string[] | "*") {
   ws.send(JSON.stringify({ op: "screens.subscribe", addresses: subscribe }));
   return { ws, frames, close: () => ws.close() };
 }
+// Command bar (contracts/input.md). The contract has no shared types; these are its shapes as written.
+type InputRequest = { agents: string[]; text: string; submit?: boolean };
+type InputResult = "sent" | "skipped: prompt_open" | "skipped: no_pane" | `failed: ${string}`;
+type InputStatus = { id: string; state: "pending" | "done" | "failed"; results?: Record<string, InputResult> };
+const UI_ORIGIN = { alex: "http://127.0.0.1:7780", sam: `http://127.0.0.1:${BASE + 9}` } as const; // alex: team-up's default
+const ALL_AGENTS = ["orchestrator", "worker-1", "worker-2", "worker-3", "worker-4"];
+const SLOT_OF: Record<string, number> = { orchestrator: 0, "worker-1": 1, "worker-2": 2, "worker-3": 3, "worker-4": 4 };
+
+/** POST /v1/panes/input the way the UI does; `headers` overrides Origin / X-Agentlink-Input (null = leave out). */
+async function paneInput(u: User, body: InputRequest, headers: Record<string, string | null> = {}) {
+  const h: Record<string, string> = { "content-type": "application/json" };
+  const want = { origin: UI_ORIGIN[u], "x-agentlink-input": "1", ...headers };
+  for (const [k, v] of Object.entries(want)) if (v !== null) h[k] = v;
+  const res = await fetch(`http://127.0.0.1:${PORT[u]}/v1/panes/input`, { method: "POST", headers: h, body: JSON.stringify(body) });
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+async function inputDone(u: User, id: string): Promise<InputStatus> {
+  return until(`input ${id} done`, async () => {
+    const s = (await api(u, "GET", `/v1/panes/input/${id}`)).body as InputStatus;
+    return s && s.state !== "pending" ? s : null;
+  }, 20_000);
+}
+const paneOpt = async (u: User, slot: number, opt: string) => (await tmux("show", "-p", "-v", "-t", panes[u][slot], opt).catch(() => "")).trim();
+/** Every log file under a user's data dir, concatenated (to check what was and wasn't logged). */
+function allLogs(u: User): string {
+  const dir = path.join(dataDir(u), "logs");
+  if (!fs.existsSync(dir)) return "";
+  return fs.readdirSync(dir).map((f) => {
+    try {
+      return fs.readFileSync(path.join(dir, f), "utf8");
+    } catch {
+      return "";
+    }
+  }).join("\n");
+}
+
 type Screen = Extract<ServerFrame, { op: "screen" }>;
 const screensFor = (frames: { at: number; frame: ServerFrame }[], address: string) =>
   frames.filter((f): f is { at: number; frame: Screen } => f.frame.op === "screen" && f.frame.address === address);
@@ -197,6 +234,18 @@ async function makeFakeTeam(u: User) {
   }
 }
 
+/** Put a fresh `cat` pane into a slot (after a kill-pane) and rewrite the registry to point at it. */
+async function replacePane(u: User, slot: number) {
+  const s = session(u);
+  const id = (await tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${s}:`, "cat > /dev/null")).trim();
+  panes[u][slot] = id;
+  await tmux("set", "-p", "-t", id, "@role", slot === 0 ? "orchestrator" : "worker");
+  await tmux("set", "-p", "-t", id, "@state", slot === 0 ? "idle" : "working");
+  if (slot !== 0) await tmux("set", "-p", "-t", id, "@task", `fake task ${slot}`);
+  const order = [1, 2, 3, 4, 0];
+  fs.writeFileSync(path.join(c4Dir(u), "panes"), order.map((n) => `${n} ${panes[u][n]}`).join("\n") + "\n");
+}
+
 // ---------------------------------------------------------------- the test
 
 async function main() {
@@ -209,7 +258,8 @@ async function main() {
   await step("setup: fake c4 teams and team-up.sh for both users", async () => {
     for (const u of USERS) await makeFakeTeam(u);
     check("two tmux sessions with 5 cat panes each, registries written", true);
-    const summary = { alex: await teamUp("alex"), sam: await teamUp("sam") };
+    // alex keeps team-up's default UI origin; sam gets a custom one, to show AGENTLINK_UI_ORIGIN passes through.
+    const summary = { alex: await teamUp("alex"), sam: await teamUp("sam", [], { AGENTLINK_UI_ORIGIN: UI_ORIGIN.sam }) };
     for (const u of USERS) {
       check(`${u}: summary says screens are not shared (no --share-screens)`, summary[u].includes("screens    not shared"), summary[u]);
       check(`${u}: local.env records AGENTLINK_SHARE_SCREENS=0`, localEnv(u).includes("AGENTLINK_SHARE_SCREENS=0"));
@@ -414,6 +464,111 @@ async function main() {
       ui.close();
       all.close();
     }
+  });
+
+  await step("7. command bar: local input types into alex's own panes; nothing else can", async () => {
+    await replacePane("alex", 1); // step 6 killed it
+    await until("alex/worker-1 back at the hub", async () => (await hubSession("alex/worker-1"))?.status !== "offline" && (await hubSession("alex/worker-1")), 15_000);
+    const logCount = (ev: string) => count(allLogs("alex"), `"event":"${ev}"`);
+    const requestedBefore = logCount("input.requested");
+    const typedBefore = logCount("input.typed");
+
+    // 7a. All five panes, once each.
+    const mark = `E2E-INPUT-${randomBytes(4).toString("hex")}`;
+    const r = await paneInput("alex", { agents: ALL_AGENTS, text: `echo ${mark}` });
+    check("POST /v1/panes/input with the UI origin + X-Agentlink-Input → 202 {id}", r.status === 202 && typeof r.body?.id === "string", r);
+    if (r.status === 202) {
+      const st = await inputDone("alex", r.body.id);
+      check("input finished as done, every pane 'sent'", st.state === "done" && ALL_AGENTS.every((a) => st.results?.[a] === "sent"), st);
+      await sleep(3_000); // a late duplicate would show by now
+      for (const a of ALL_AGENTS) {
+        const n = count(await screen("alex", SLOT_OF[a]), mark);
+        check(`alex ${a} (slot ${SLOT_OF[a]}): typed exactly once`, n === 1, n);
+      }
+    }
+    for (const slot of [0, 1, 2, 3, 4]) {
+      const now = await screen("sam", slot);
+      check(`sam slot ${slot}: untouched`, !now.includes(mark), now.slice(-200));
+    }
+    // .log and .out files both carry the JSON lines, so count "more than before" rather than exact numbers
+    check("daemon logged input.requested", logCount("input.requested") > requestedBefore, { before: requestedBefore, after: logCount("input.requested") });
+    check("bridge logged input.typed for the five panes", logCount("input.typed") >= typedBefore + 5, { before: typedBefore, after: logCount("input.typed") });
+    check("the typed text is in no log", !allLogs("alex").includes(mark));
+
+    // 7b. A pane showing a yes/no prompt is skipped; typing would answer it.
+    await tmux("respawn-pane", "-k", "-t", panes.alex[3], `printf 'Do you want to proceed?\\n  1. Yes\\n  2. No\\n'; exec cat > /dev/null`);
+    await sleep(1_500);
+    const mark2 = `E2E-PROMPT-${randomBytes(4).toString("hex")}`;
+    const p = await paneInput("alex", { agents: ["worker-3", "worker-4"], text: mark2 });
+    if (p.status === 202) {
+      const st = await inputDone("alex", p.body.id);
+      check("prompt pane: result 'skipped: prompt_open'", st.results?.["worker-3"] === "skipped: prompt_open", st);
+      check("the other pane in the same request: 'sent'", st.results?.["worker-4"] === "sent", st);
+      await sleep(1_000);
+      check("nothing typed into the prompt pane", !(await screen("alex", 3)).includes(mark2));
+    } else check("prompt request accepted", false, p);
+    await tmux("respawn-pane", "-k", "-t", panes.alex[3], "cat > /dev/null");
+
+    // 7c. /clear resets @state and @task.
+    await tmux("set", "-p", "-t", panes.alex[2], "@state", "working");
+    await tmux("set", "-p", "-t", panes.alex[2], "@task", "old task before clear");
+    const c = await paneInput("alex", { agents: ["worker-2"], text: "/clear" });
+    if (c.status === 202) {
+      const st = await inputDone("alex", c.body.id);
+      check("/clear: 'sent'", st.results?.["worker-2"] === "sent", st);
+      check("/clear: pane @state is idle", (await paneOpt("alex", 2, "@state")) === "idle", await paneOpt("alex", 2, "@state"));
+      check("/clear: pane @task is empty", (await paneOpt("alex", 2, "@task")) === "", await paneOpt("alex", 2, "@task"));
+      check("/clear: typed into the pane", (await screen("alex", 2)).includes("/clear"));
+      await until("hub task cleared", async () => ((await hubSession("alex/worker-2"))?.task === "" ? true : null), 15_000);
+      check("/clear: the hub shows no task for alex/worker-2", true);
+    } else check("/clear request accepted", false, c);
+
+    // 7d. Origin and header guards: 403, and nothing typed.
+    const bad = `E2E-BAD-${randomBytes(4).toString("hex")}`;
+    const tries: [string, Record<string, string | null>][] = [
+      ["another localhost origin", { origin: "http://127.0.0.1:5173" }],
+      ["localhost name instead of 127.0.0.1", { origin: "http://localhost:7780" }],
+      ["no Origin header", { origin: null }],
+      ["no X-Agentlink-Input header", { "x-agentlink-input": null }],
+    ];
+    for (const [what, hdr] of tries) {
+      const res = await paneInput("alex", { agents: ["worker-4"], text: bad }, hdr);
+      check(`${what} → 403`, res.status === 403, res);
+    }
+    // sam's daemon runs with a custom AGENTLINK_UI_ORIGIN, so the default origin must be refused there
+    const samDefault = await paneInput("sam", { agents: ["worker-4"], text: bad }, { origin: UI_ORIGIN.alex });
+    check("sam's daemon (custom AGENTLINK_UI_ORIGIN) refuses the default origin → 403", samDefault.status === 403, samDefault);
+    await sleep(2_000);
+    check("refused requests typed nothing", !(await screen("alex", 4)).includes(bad) && !(await screen("sam", 4)).includes(bad));
+
+    // 7e. Nothing from sam can type into alex's panes: messages that look like input are pasted as remote requests.
+    await tmux("set", "-p", "-t", panes.alex[2], "@state", "working");
+    await tmux("set", "-p", "-t", panes.alex[2], "@task", "keep me");
+    const inputLines = () => logCount("input.requested");
+    const before = inputLines();
+    const remoteMark = `E2E-REMOTE-${randomBytes(4).toString("hex")}`;
+    const ids = [
+      await send("sam", "alex/worker-2", "task", "/clear"),
+      await send("sam", "alex/orchestrator", "chat", `${remoteMark} /clear`),
+    ];
+    const rich = await api("sam", "POST", "/v1/send", {
+      to: "alex/worker-2",
+      type: "task",
+      body: { text: remoteMark, op: "input", agents: ALL_AGENTS, input: { agents: ALL_AGENTS, text: "/clear" } },
+    });
+    check("sam's input-shaped messages are accepted as ordinary messages", rich.status === 202, rich);
+    ids.push(rich.body?.id);
+    await until("sam's messages pasted into alex's orchestrator pane", async () => {
+      const s0 = await screen("alex", 0);
+      return ids.every((id) => s0.includes(`id ${String(id).slice(0, 8)}]`));
+    });
+    const s0 = await screen("alex", 0);
+    check("they arrive as REMOTE requests in the orchestrator pane", /REMOTE REQUEST from sam\/orchestrator/.test(s0), s0.slice(-500));
+    await sleep(4_000);
+    check("no input.requested at alex's daemon from sam's messages", inputLines() === before, { before, after: inputLines() });
+    check("alex worker-2 @task survived ('keep me')", (await paneOpt("alex", 2, "@task")) === "keep me", await paneOpt("alex", 2, "@task"));
+    check("alex worker-2 @state survived (working)", (await paneOpt("alex", 2, "@state")) === "working", await paneOpt("alex", 2, "@state"));
+    check("nothing pasted into alex's worker panes", (await Promise.all([1, 2, 3, 4].map((n) => screen("alex", n)))).every((s) => !s.includes(remoteMark)));
   });
 }
 

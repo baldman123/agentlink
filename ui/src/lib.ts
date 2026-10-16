@@ -24,6 +24,23 @@ export type ContextPutResult =
   | { ok: false; conflict: ContextEntry }
   | { ok: false; error: string };
 
+// Local pane input (contracts/input.md; no shared types for it in contracts/index.ts).
+export interface PaneInputRequest {
+  agents: string[]; // local agent names: orchestrator, worker-1..worker-4
+  text: string; // 1..4000 chars
+  submit?: boolean; // default true: press Enter after the paste
+}
+export type PaneResult = "sent" | "skipped: prompt_open" | "skipped: no_pane" | `failed: ${string}`;
+export interface PaneInputStatus {
+  id: string;
+  state: "pending" | "done" | "failed";
+  results?: Record<string, PaneResult>;
+}
+export type PaneInputResponse =
+  | { ok: true; id: string }
+  | { ok: false; kind: "no_bridge" | "forbidden" | "bad_request" | "network"; message: string };
+export const PANE_INPUT_MAX = 4000;
+
 export interface ConnectHandlers {
   onFrame(frame: ServerFrame): void;
   onState(state: ConnState, detail?: string): void;
@@ -40,6 +57,9 @@ export interface Transport {
   putContext(key: string, write: Omit<ContextWrite, "author"> & { agent?: string }): Promise<ContextPutResult>;
   /** Replaces the live-screen subscription ([] = none). Re-sent automatically after a reconnect. */
   subscribeScreens(addresses: Address[]): void;
+  /** Types into this laptop's own panes via the daemon + bridge (trusted local input; never crosses the hub). */
+  paneInput(req: PaneInputRequest): Promise<PaneInputResponse>;
+  paneInputStatus(id: string): Promise<PaneInputStatus | null>;
 }
 
 // ---------------------------------------------------------------------------

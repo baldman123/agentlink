@@ -691,8 +691,70 @@ button.tnode:hover { border-color: var(--faint); }
 .boss-hint { font: 10px/1 "JetBrains Mono Variable", monospace; color: #6b7386; }
 @keyframes breathe { 50% { transform: scale(1.06); opacity: 0.7; } }
 
-.tzoom { position: absolute; inset: 58px 0 0 0; z-index: 10; padding: 14px 16px 16px; background: rgba(5, 7, 10, 0.55); display: flex; animation: fade 0.12s; }
+.tstage-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.tzoom { position: absolute; inset: 0; z-index: 10; padding: 14px 16px 16px; background: rgba(5, 7, 10, 0.55); display: flex; animation: fade 0.12s; }
 .tzoom .tpane { flex: 1; cursor: default; }
+
+/* ---------- command bar (local pane input) ---------- */
+.cmdbar { flex: none; padding: 10px 16px 8px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.cmd-row { display: flex; align-items: center; gap: 10px; }
+.cmd-field {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; height: 36px; padding: 0 12px;
+  border-radius: 9px; border: 1px solid var(--term-line); background: var(--term-bg); color: var(--term-fg);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.cmd-field:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
+.cmd-glyph { color: var(--accent); font: 600 14px/1 "JetBrains Mono Variable", monospace; opacity: 0.85; }
+.cmd-field input {
+  flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: transparent; color: var(--term-fg);
+  font: 13px/1 "JetBrains Mono Variable", monospace;
+}
+.cmd-field input::placeholder { color: #5f687a; }
+.cmd-targets { display: flex; gap: 4px; flex: none; }
+.cmd-chk {
+  position: relative; display: inline-flex; align-items: center; height: 30px; padding: 0 9px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--line-strong); color: var(--muted); font: 600 11.5px/1 "JetBrains Mono Variable", monospace;
+  transition: background-color 0.12s, color 0.12s, border-color 0.12s; user-select: none;
+}
+.cmd-chk input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.cmd-chk span::before { content: "○ "; opacity: 0.7; }
+.cmd-chk.on { color: var(--accent-text); border-color: var(--accent-line); background: var(--accent-soft); }
+.cmd-chk.on span::before { content: "● "; opacity: 1; }
+.cmd-chk.absent span { text-decoration: line-through; text-decoration-color: var(--faint); }
+.cmd-chk:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cmd-all { margin-left: 4px; }
+.cmd-send { height: 34px; }
+.cmd-send .kbd { background: transparent; border-color: rgba(27, 19, 6, 0.3); color: inherit; opacity: 0.7; }
+.cmd-reset { height: 34px; }
+.cmd-results { display: flex; align-items: center; gap: 12px; margin-top: 8px; min-height: 26px; font-size: 12px; animation: rise 0.18s ease-out; }
+.cmd-echo { font: 12px/1 "JetBrains Mono Variable", monospace; color: var(--muted); white-space: nowrap; max-width: 34%; overflow: hidden; text-overflow: ellipsis; }
+.cmd-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.rchip { font: 11px/1 "JetBrains Mono Variable", monospace; padding: 5px 8px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--muted); }
+.rchip b { font-weight: 700; margin-right: 3px; }
+.rchip-ok { color: var(--idle); border-color: color-mix(in srgb, var(--idle) 45%, transparent); }
+.rchip-skip { color: var(--accent-text); border-color: var(--accent-line); }
+.rchip-fail { color: var(--error); border-color: color-mix(in srgb, var(--error) 50%, transparent); }
+.rchip-wait { color: var(--faint); }
+.rchip-wait::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 6px; border-radius: 50%; background: var(--accent); vertical-align: 1px; animation: blink 0.9s steps(2, jump-none) infinite; }
+.cmd-error { color: var(--error); font-size: 12.5px; }
+.cmd-hint { color: var(--faint); font-size: 11.5px; }
+
+.dialog { width: 520px; max-width: calc(100vw - 32px); background: var(--panel); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: var(--shadow); padding: 18px 20px 16px; }
+.dialog h2 { margin: 0 0 6px; font-size: 16px; }
+.dialog p { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.dialog code { font-family: "JetBrains Mono Variable", monospace; font-size: 12px; padding: 1px 5px; border-radius: 4px; background: var(--sunk); border: 1px solid var(--line); color: var(--text); }
+.dialog-list { list-style: none; margin: 0 0 12px; padding: 6px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.dialog-list li { display: grid; grid-template-columns: 52px 150px 1fr; gap: 10px; align-items: baseline; padding: 4px 2px; font-size: 12.5px; }
+.dl-name { font: 700 12px/1 "JetBrains Mono Variable", monospace; color: var(--accent-text); }
+.dl-addr { font: 12px/1 "JetBrains Mono Variable", monospace; color: var(--muted); }
+.dl-task { color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dialog-check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; cursor: pointer; }
+.dialog-check input { margin-top: 3px; accent-color: var(--accent); }
+.dialog-check em { color: var(--faint); font-style: normal; }
+
+.cutoff { display: flex; align-items: center; justify-content: center; gap: 4px; margin: 6px 0 14px; font-size: 12px; color: var(--faint); }
+.cutoff-line { gap: 10px; margin: 16px 0; }
+.cutoff-line::before, .cutoff-line::after { content: ""; flex: 1; border-top: 1px dashed var(--line-strong); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }

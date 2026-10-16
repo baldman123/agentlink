@@ -8,7 +8,7 @@ import type {
   UserPresence,
 } from "../../contracts/index.ts";
 import { HUMAN_AGENT } from "../../contracts/index.ts";
-import { involves, userOf, type ConnState } from "./lib.ts";
+import { involves, safeStorage, userOf, type ConnState } from "./lib.ts";
 
 export interface Activity {
   id: string;
@@ -49,6 +49,8 @@ export interface State {
   activity: Activity[];
   flash: Record<string, number>; // context key -> when it last changed live
   pulses: Pulse[];
+  /** Local-only "clear chat history": messages before this are hidden in this browser (nothing is deleted). */
+  historyCutoff: string | null;
 }
 
 export const initialState: State = {
@@ -68,7 +70,10 @@ export const initialState: State = {
   activity: [],
   flash: {},
   pulses: [],
+  historyCutoff: null,
 };
+
+export const cutoffKey = (user: string) => `al.historyCutoff.${user}`;
 
 const PULSE_KEEP_MS = 4000;
 
@@ -96,7 +101,8 @@ export type Action =
   | { type: "select"; address: Address }
   | { type: "history"; address: Address; status: State["history"][string]; messages?: StoredMessage[] }
   | { type: "context.local"; entry: ContextEntry }
-  | { type: "toast.done"; id: string };
+  | { type: "toast.done"; id: string }
+  | { type: "history.cutoff"; at: string | null };
 
 const LIVE_WINDOW_MS = 15_000; // replayed events older than this don't toast
 
@@ -230,7 +236,9 @@ function verb(t: string) {
 export function reducer(s: State, a: Action): State {
   switch (a.type) {
     case "boot":
-      return { ...s, me: a.me, hubUrl: a.hubUrl };
+      return { ...s, me: a.me, hubUrl: a.hubUrl, historyCutoff: s.me === a.me ? s.historyCutoff : safeStorage<string | null>(cutoffKey(a.me), null) };
+    case "history.cutoff":
+      return { ...s, historyCutoff: a.at };
     case "conn":
       return { ...s, conn: a.state, connDetail: a.detail ?? "" };
     case "frame": {

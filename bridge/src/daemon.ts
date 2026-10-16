@@ -1,5 +1,23 @@
 import type { InboxItem, ScreenUpdate, Session, SessionKind, SessionStatus } from "../../contracts/index.ts";
 
+// Local terminal input (contracts/input.md). The contract has no shared types, so its shapes are defined here as written.
+export interface InputRequest {
+  id: string;
+  agents: string[];
+  text: string;
+  submit: boolean;
+}
+export type InputResult = "sent" | "skipped: prompt_open" | "skipped: no_pane" | `failed: ${string}`;
+
+export class DaemonHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 /** The few daemon localhost endpoints the bridge needs (contracts/daemon-api.md). */
 export class Daemon {
   constructor(readonly baseUrl: string) {}
@@ -16,7 +34,7 @@ export class Daemon {
     try {
       json = text ? JSON.parse(text) : null;
     } catch {}
-    if (!res.ok) throw new Error(`daemon ${method} ${path} -> ${res.status} ${json?.error ?? text.slice(0, 120)}`);
+    if (!res.ok) throw new DaemonHttpError(res.status, `daemon ${method} ${path} -> ${res.status} ${json?.error ?? text.slice(0, 120)}`);
     return { status: res.status, json };
   }
 
@@ -41,9 +59,23 @@ export class Daemon {
   }
 
   /** Stream new inbox arrivals (SSE). Resolves when the stream ends; throws on connect failure. */
-  async stream(onItem: (item: InboxItem) => void, signal: AbortSignal, onOpen?: () => void): Promise<void> {
-    const res = await fetch(`${this.baseUrl}/v1/inbox/stream`, { headers: { accept: "text/event-stream" }, signal });
-    if (!res.ok || !res.body) throw new Error(`inbox stream -> ${res.status}`);
+  stream(onItem: (item: InboxItem) => void, signal: AbortSignal, onOpen?: () => void): Promise<void> {
+    return this.sse("/v1/inbox/stream", "message", (d) => onItem(d as InboxItem), signal, onOpen);
+  }
+
+  /** Stream local terminal input requests (contracts/input.md). */
+  inputStream(onRequest: (r: unknown) => void, signal: AbortSignal, onOpen?: () => void): Promise<void> {
+    return this.sse("/v1/panes/input/stream", "input", onRequest, signal, onOpen);
+  }
+
+  async postInputResult(id: string, results: Record<string, InputResult>): Promise<void> {
+    await this.req("POST", `/v1/panes/input/${encodeURIComponent(id)}/result`, { results });
+  }
+
+  /** Read one SSE stream, calling onData with each parsed `event: <wanted>` payload. Resolves when it ends. */
+  private async sse(path: string, wanted: string, onData: (d: unknown) => void, signal: AbortSignal, onOpen?: () => void): Promise<void> {
+    const res = await fetch(`${this.baseUrl}${path}`, { headers: { accept: "text/event-stream" }, signal });
+    if (!res.ok || !res.body) throw new Error(`${path} -> ${res.status}`);
     onOpen?.();
     const decoder = new TextDecoder();
     let buf = "";
@@ -59,12 +91,14 @@ export class Daemon {
           if (line.startsWith("event:")) event = line.slice(6).trim();
           else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
         }
-        if (event !== "message" || !data.length) continue;
+        if (event !== wanted || !data.length) continue;
+        let parsed: unknown;
         try {
-          onItem(JSON.parse(data.join("\n")) as InboxItem);
+          parsed = JSON.parse(data.join("\n"));
         } catch {
-          // a malformed frame is skipped; the catch-up on reconnect covers anything missed
+          continue; // a malformed frame is skipped
         }
+        onData(parsed);
       }
     }
   }

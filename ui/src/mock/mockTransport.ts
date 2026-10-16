@@ -14,7 +14,7 @@ import type {
   StoredMessage,
   UserPresence,
 } from "../../../contracts/index.ts";
-import { involves, params, userOf, type ConnectHandlers, type Transport } from "../lib.ts";
+import { involves, PANE_INPUT_MAX, params, userOf, type ConnectHandlers, type PaneInputStatus, type PaneResult, type Transport } from "../lib.ts";
 import { screenStore } from "../screens.ts";
 import { makeScreenSim } from "./screens.ts";
 
@@ -267,6 +267,7 @@ export function mockTransport(daemonPort: number): Transport {
   const findSession = (a: string) => users.get(userOf(a))?.sessions.find((s) => s.address === a);
   const sim = makeScreenSim(findSession);
   let screenSubs: string[] = [];
+  const inputs = new Map<string, PaneInputStatus>();
   const pushScreen = (a: string, fresh: boolean) => {
     if (!connected || !handlers || !sharing.has(userOf(a)) || !findSession(a)) return;
     handlers.onFrame({ op: "screen", address: a, screen: fresh ? sim.render(a) : sim.tick(a), at: iso() });
@@ -336,6 +337,36 @@ export function mockTransport(daemonPort: number): Transport {
         }, 1400);
       }
       return { id: m.id, queued: true as const };
+    },
+    async paneInput(req) {
+      await new Promise((r) => setTimeout(r, 150));
+      if (params.get("mockbridge") === "0")
+        return { ok: false as const, kind: "no_bridge" as const, message: "No bridge is connected on this laptop, so nothing can be typed into the panes. Start it with scripts/team-up.sh, then try again." };
+      if (!req.agents.length || !req.text || req.text.length > PANE_INPUT_MAX) return { ok: false as const, kind: "bad_request" as const, message: "Bad input request." };
+      const id = uuid();
+      inputs.set(id, { id, state: "pending" });
+      // the "bridge" types it a moment later, one pane at a time
+      setTimeout(() => {
+        const results: Record<string, PaneResult> = {};
+        for (const agent of req.agents) {
+          const a = `${me}/${agent}`;
+          const s = findSession(a);
+          if (!s) results[agent] = "skipped: no_pane";
+          else if (s.status === "waiting") results[agent] = "skipped: prompt_open";
+          else {
+            results[agent] = "sent";
+            sim.typed(a, req.text);
+            if (req.text.trim() === "/clear") touch(a, { status: "idle", task: "" });
+            else if (req.submit !== false) touch(a, { status: "working", task: req.text.slice(0, 60) });
+            pushScreen(a, true);
+          }
+        }
+        inputs.set(id, { id, state: "done", results });
+      }, 700 + Math.random() * 500);
+      return { ok: true as const, id };
+    },
+    async paneInputStatus(id) {
+      return inputs.get(id) ?? null;
     },
     subscribeScreens(addresses) {
       const next = [...new Set(addresses)].sort();

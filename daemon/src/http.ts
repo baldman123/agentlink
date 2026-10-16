@@ -16,6 +16,7 @@ import {
 } from "../../contracts/index.ts";
 import type { Config } from "./config.ts";
 import { HubOffline, type HubLink } from "./hublink.ts";
+import { InputChannel } from "./input.ts";
 import { log, logMsg } from "./log.ts";
 import type { Store } from "./store.ts";
 
@@ -37,6 +38,16 @@ class HttpError extends Error {
   }
 }
 
+// contracts/input.md request shapes (no shared types for these in contracts/index.ts)
+interface InputRequestBody {
+  agents: string[];
+  text: string;
+  submit?: boolean;
+}
+interface InputResultBody {
+  results: Record<string, string>; // "sent" | "skipped: prompt_open" | "skipped: no_pane" | "failed: <why>"
+}
+
 interface SseClient {
   res: http.ServerResponse;
   agent: string | null;
@@ -44,6 +55,7 @@ interface SseClient {
 
 export function createServer(cfg: Config, store: Store, hub: HubLink) {
   const sse = new Set<SseClient>();
+  const input = new InputChannel(); // only these HTTP handlers can reach it; the hub link has no reference
   const allowedHosts = new Set([`127.0.0.1:${cfg.port}`, `localhost:${cfg.port}`, `[::1]:${cfg.port}`]);
 
   hub.on("inbox", (item: InboxItem) => {
@@ -60,14 +72,17 @@ export function createServer(cfg: Config, store: Store, hub: HubLink) {
       // DNS-rebinding guard: only answer requests addressed to the loopback name.
       if (!req.headers.host || !allowedHosts.has(req.headers.host)) throw new HttpError(403, "forbidden_host");
       if (origin !== undefined) {
-        if (!LOCAL_ORIGIN_RE.test(origin)) throw new HttpError(403, "forbidden_origin");
+        if (!LOCAL_ORIGIN_RE.test(origin) && origin !== cfg.uiOrigin) throw new HttpError(403, "forbidden_origin");
         res.setHeader("access-control-allow-origin", origin);
         res.setHeader("vary", "Origin");
       }
       if (req.method === "OPTIONS") {
+        // X-Agentlink-Input is allowed only on the input endpoint and only for the UI's exact origin,
+        // so no other page's preflight for it can succeed.
+        const inputPreflight = new URL(req.url ?? "/", "http://localhost").pathname === "/v1/panes/input" && origin === cfg.uiOrigin;
         res.writeHead(204, {
           "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "access-control-allow-headers": "content-type",
+          "access-control-allow-headers": inputPreflight ? "content-type, x-agentlink-input" : "content-type",
           "access-control-max-age": "600",
         });
         res.end();
@@ -178,6 +193,47 @@ export function createServer(cfg: Config, store: Store, hub: HubLink) {
     if (m === "GET" && p === "/v1/peers") return proxy(res, "GET", "/api/sessions");
     if (m === "GET" && p === "/v1/messages") return proxy(res, "GET", "/api/messages" + url.search);
 
+    // ---- local terminal input (input.md): the local person typing into their own panes ----
+    if (p === "/v1/panes/input" && m === "POST") {
+      // exact UI origin (a missing Origin fails too), plus the custom header that forces a preflight
+      if (req.headers.origin !== cfg.uiOrigin) throw new HttpError(403, "forbidden_origin", "input is accepted only from the agentlink UI");
+      if (req.headers["x-agentlink-input"] !== "1") throw new HttpError(403, "missing_header", "X-Agentlink-Input: 1 is required");
+      const b = (await readJson(req)) as Partial<InputRequestBody>;
+      const agents = b.agents;
+      if (!Array.isArray(agents) || agents.length < 1 || agents.length > 16 || !agents.every((a) => typeof a === "string" && AGENT_RE.test(a)))
+        throw new HttpError(400, "bad_agents", "agents must be 1-16 local agent names");
+      if (new Set(agents).size !== agents.length) throw new HttpError(400, "bad_agents", "duplicate agent");
+      if (typeof b.text !== "string" || b.text.length < 1 || b.text.length > 4000) throw new HttpError(400, "bad_text", "text must be 1-4000 characters");
+      if (b.submit !== undefined && typeof b.submit !== "boolean") throw new HttpError(400, "bad_submit");
+      if (!input.bridgeConnected) throw new HttpError(503, "no_bridge", "no bridge is connected to this daemon");
+      const id = input.submit(agents, b.text, b.submit ?? true);
+      return json(res, 202, { id });
+    }
+    // The bridge's endpoints refuse anything with an Origin header: a browser always sends one, the
+    // bridge (a node process) never does. So no web page can read the typed text or forge results.
+    if (p === "/v1/panes/input/stream" && m === "GET") {
+      if (req.headers.origin !== undefined) throw new HttpError(403, "forbidden_origin", "bridge only");
+      input.attachBridge(req, res);
+      return;
+    }
+    if ((match = p.match(/^\/v1\/panes\/input\/([0-9a-f-]{36})\/result$/)) && m === "POST") {
+      if (req.headers.origin !== undefined) throw new HttpError(403, "forbidden_origin", "bridge only");
+      const b = (await readJson(req)) as Partial<InputResultBody>;
+      const results = b.results;
+      if (!results || typeof results !== "object" || Array.isArray(results) || !Object.values(results).every((v) => typeof v === "string"))
+        throw new HttpError(400, "bad_results");
+      const r = input.result(match[1], results);
+      if (r === "unknown") throw new HttpError(404, "not_found");
+      if (r === "finished") throw new HttpError(409, "already_finished");
+      res.writeHead(204).end();
+      return;
+    }
+    if ((match = p.match(/^\/v1\/panes\/input\/([0-9a-f-]{36})$/)) && m === "GET") {
+      const s = input.status(match[1]);
+      if (!s) throw new HttpError(404, "not_found");
+      return json(res, 200, s);
+    }
+
     // ---- screens (screens.md): memory only, forwarded to the hub as {op:"screen"} ----
     if ((match = p.match(/^\/v1\/screens\/([^/]+)$/))) {
       const agent = decodeURIComponent(match[1]);
@@ -287,6 +343,7 @@ export function createServer(cfg: Config, store: Store, hub: HubLink) {
       }),
     close: () => {
       clearInterval(keepalive);
+      input.close();
       for (const c of sse) c.res.end();
       server.close();
     },

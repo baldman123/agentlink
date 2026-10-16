@@ -89,6 +89,22 @@ Before sending a screen, the bridge replaces these with `[redacted]`:
 
 That list is pattern matching, and it will miss things. A password printed as `pw: hunter2`, a database URL with the password inside it, a key split across two lines, a `.env` file shown with `cat` whose variable names don't end in one of those words, a cookie, or a customer's personal data in a log line all go out as they appear. Treat a shared terminal like a screen share in a meeting. Turn sharing off before you open anything secret in a claude4 pane, and leave it off if the other team shouldn't see your work at all.
 
+## Command bar
+
+Above the terminals in the app there's a command bar for your own team. Type a line, tick the panes it should go to (Boss, W1 to W4, or All) and press Enter. The bridge types it into each ticked pane and presses Enter, the same way `c4` sends a message, and each pane then shows a chip: `sent`, or `skipped: prompt open`.
+
+**Reset chats** sends `/clear` to the ticked panes after asking you to confirm. Each pane's Claude starts a fresh conversation, and its task and state are cleared so c4 and the app stop showing the old task. The confirm dialog can also clear the chat history in the app. That only hides older messages in this browser; nothing is deleted at the hub.
+
+What it can and can't do:
+
+- It types only into this laptop's own claude4 panes. It never goes through the hub, so the other team can't type into your panes, and you can't type into theirs. Their terminals have no command bar.
+- A pane that's showing a yes/no prompt is skipped, because typing there would answer the prompt. Answer it in the terminal, then send again.
+- Messages from the other team are still requests pasted into the boss's pane. Nothing in a message, a screen or the shared context can make the bridge type.
+- The daemon accepts input only from the app's own address, `http://127.0.0.1:7780`, and only with a header that a plain link or form can't send. Another web page open in your browser, even one on localhost, gets refused. If you serve the app from another address, start with `AGENTLINK_UI_ORIGIN=http://127.0.0.1:<port> scripts/team-up.sh ...` after a `team-down.sh`, because the daemon reads it when it starts.
+- The daemon and bridge log that input was sent, to which panes and how long it was, but never the text.
+
+It is as powerful as typing into the terminals yourself: a line sent to All goes to five Claudes at once. Check the ticked panes before you press Enter.
+
 ## Troubleshooting
 
 The app or `team-up.sh` says the hub link is `connecting` or `reconnecting`.

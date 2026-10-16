@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
-    "test": "tsx test/redact.test.ts && tsx test/bridge.test.ts"
+    "test": "tsx test/redact.test.ts && tsx test/bridge.test.ts && tsx test/input.test.ts"
   },
   "dependencies": {
     "tsx": "^4.23.15"

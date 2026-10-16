@@ -7,6 +7,7 @@ import { screenStore, useScreen, useScreensVersion } from "../screens.ts";
 import type { Pulse } from "../store.ts";
 import { Skeleton, useApp } from "./bits.tsx";
 import { ViewToggle } from "./ViewToggle.tsx";
+import { CommandBar } from "./CommandBar.tsx";
 
 const SLOTS = [
   { agent: "worker-1", label: "WORKER 1", pos: "tl" },
@@ -300,6 +301,7 @@ export function TerminalsView() {
   }
   const livePulses = state.pulses.filter((p) => now - p.at < PULSE_MS + 150);
 
+  const myTeam = state.me ? state.users[state.me] : undefined;
   const zoomSession = zoomed ? state.users[userOf(zoomed)]?.sessions.find((s) => s.address === zoomed) : undefined;
   const zoomLabel = zoomed ? (zoomed.endsWith("/orchestrator") ? "BOSS" : (SLOTS.find((s) => zoomed.endsWith(`/${s.agent}`))?.label ?? zoomed.split("/")[1].toUpperCase())) : "";
 
@@ -327,11 +329,14 @@ export function TerminalsView() {
         )}
         <ViewToggle />
       </div>
+      {/* local input: only for the signed-in user's own team, even in "both" */}
+      {myTeam && shown.some((u) => u.user === state.me) && <CommandBar team={myTeam} />}
       {!state.snapshotReady ? (
         <div className="pad"><Skeleton lines={10} /></div>
       ) : users.length === 0 ? (
         <div className="empty big"><strong>No teams on the hub yet.</strong><span>Start a daemon and bridge on each laptop to see their terminals.</span></div>
       ) : (
+        <div className="tstage-wrap">
         <div className={`tstage-scroll ${both ? "both" : ""}`}>
           <div className="tstage" ref={stage}>
             <svg className="twires" width={size.w} height={size.h} aria-hidden>
@@ -365,6 +370,7 @@ export function TerminalsView() {
               <Block key={u.user} u={u} me={state.me} activeAddr={zoomed ?? state.selected} rings={rings} zoom={setZoomed} />
             ))}
           </div>
+        </div>
           {zoomed && (
             <div className="tzoom" onMouseDown={(e) => e.target === e.currentTarget && setZoomed(null)}>
               <Pane address={zoomed} label={zoomLabel} pos="zoom" session={zoomSession} active ring={false} zoomed onClose={() => setZoomed(null)} />
