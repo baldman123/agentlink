@@ -13,8 +13,15 @@ TXT `{ v: "1", hub_id, name }` where `name` is that same value. Withdraw the adv
 ## Auth
 
 Shared token from `AGENTLINK_TOKEN` (required; the hub refuses to start without one).
-- WS: first frame `hello` with `token`. Wrong or missing token, or no hello within 5s → `error{auth_failed}` and close 4001.
-- REST: `Authorization: Bearer <token>`, else 401 `{error:"unauthorized"}`. `GET /api/health` is open.
+Protocol v2: the shared token never crosses the network.
+- WS: on connect the hub sends `challenge{nonce (32 random bytes, hex), hub_id, hub_name, protocol}`. The client checks `hub_id` against
+  its pin (and closes if it differs, sending nothing), then sends `hello{role, user, protocol, since_seq?, cnonce, proof}` (formulas in index.ts).
+  The hub recomputes `proof` with a constant-time compare. Wrong proof, an old-protocol hello (has `token` or protocol < 2), or no hello within
+  5s → `error{auth_failed}` and close 4001 (4002 for a protocol mismatch). On success it sends `welcome{…, server_proof, session}`.
+  The client verifies `server_proof` before anything else. Nonces are single use.
+- REST: `Authorization: Bearer <session>` where session comes from a live socket's welcome (valid while that socket is open plus 60s),
+  else 401 `{error:"unauthorized"}`. The shared token is NOT accepted on REST any more. `GET /api/health` and `GET /` are open.
+- Messages themselves still travel unencrypted on the LAN (no TLS in v2): anyone on the network can read message text, but not the token.
 
 ## WebSocket `/ws`
 

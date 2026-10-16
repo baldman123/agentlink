@@ -1,7 +1,7 @@
 // agentlink shared contracts — v1.
 // Every component builds against these types. Changes go through the orchestrator only.
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2; // v2: challenge-response auth, the token never crosses the network (see hub-api.md "Auth")
 export const HOP_LIMIT = 5; // a message with hops > HOP_LIMIT is dropped and logged
 export const MDNS_SERVICE_TYPE = "agentlink"; // advertised as _agentlink._tcp
 export const HEARTBEAT_INTERVAL_MS = 10_000;
@@ -126,7 +126,9 @@ export type ClientRole = "daemon" | "ui";
 
 export type ClientFrame =
   // must be the first frame, within 5s, else close 4001
-  | { op: "hello"; token: string; role: ClientRole; user: string; protocol: number; since_seq?: number }
+  // v2: answers the server's "challenge". proof = HMAC-SHA256(key=token, "agentlink-v2|c|" + nonce + "|" + hub_id + "|" + user + "|" + role + "|" + cnonce), hex.
+  // The client checks hub_id against its pin BEFORE sending hello. No token field, ever.
+  | { op: "hello"; role: ClientRole; user: string; protocol: number; since_seq?: number; cnonce: string; proof: string }
   // daemon only
   | { op: "send"; envelope: Envelope }
   | { op: "ack"; id: string } // recipient daemon confirms it stored a delivered envelope
@@ -139,7 +141,12 @@ export type ClientFrame =
   | { op: "ping" };
 
 export type ServerFrame =
-  | { op: "welcome"; hub_id: string; hub_name: string; server_time: string; protocol: number }
+  // first frame on every new socket, before anything else
+  | { op: "challenge"; nonce: string; hub_id: string; hub_name: string; protocol: number }
+  // server_proof = HMAC-SHA256(token, "agentlink-v2|s|" + cnonce + "|" + nonce + "|" + hub_id), hex. The client verifies it before
+  // sending any other frame; a mismatch means an impostor: close, log hub.impostor, never retry that address this run.
+  // session = a random bearer for REST, valid while this socket is open (+60s grace). REST never sees the shared token.
+  | { op: "welcome"; hub_id: string; hub_name: string; server_time: string; protocol: number; server_proof: string; session: string }
   | { op: "snapshot"; users: UserPresence[]; context: ContextEntry[]; last_seq: number } // right after welcome
   // daemon only
   | { op: "accepted"; id: string } // hub persisted the envelope; sender may dequeue
