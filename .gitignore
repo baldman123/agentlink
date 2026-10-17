@@ -9,3 +9,5 @@ dist/
 *.sqlite
 *.sqlite-*
 .vercel
+# files people attach in the claude4 browser view (normally under ~/.claude4/<session>/uploads)
+uploads/
