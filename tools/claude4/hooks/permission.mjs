@@ -386,11 +386,14 @@ function mainBranchMove() {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
-// The exact call, for one-time grants: tool name plus its input with keys sorted.
+// The exact call, for one-time grants: tool name plus its input with keys sorted. Fields that don't change
+// what the call does are left out: Claude rewrites a Bash call's description on every retry.
+const COSMETIC = new Set(["description", "timeout", "run_in_background"]);
 const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(",")}]`
   : v && typeof v === "object" ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(",")}}`
   : JSON.stringify(v));
-const HASH = crypto.createHash("sha256").update(`${tool}\n${canon(args)}`).digest("hex");
+const HASH = crypto.createHash("sha256")
+  .update(`${tool}\n${canon(Object.fromEntries(Object.entries(args).filter(([k]) => !COSMETIC.has(k))))}`).digest("hex");
 
 // The owner approved this exact call earlier: use up its grant. Rename first, so two hooks can't both take it.
 function takeGrant() {
