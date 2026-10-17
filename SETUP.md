@@ -1,8 +1,16 @@
 # Setting up agentlink for two or more laptops
 
-agentlink connects the claude4 teams on several laptops, so every team sees the others' status and they can send each other tasks. One laptop runs the hub. Each laptop runs a daemon, a bridge to its claude4 session, and the web app. There's no fixed limit on how many people join; each one needs an invite from the hub laptop.
+agentlink connects the claude4 teams on several laptops, so every team sees the others' status and they can send each other tasks. The hub is either one laptop on the local network (this guide) or the agentlink website (see "Join through the website" below). Each laptop runs a daemon, a bridge to its claude4 session, and the web app. There's no fixed limit on how many people join; each one needs an invite.
 
-Every laptop needs Node 22.5 or newer (`node --version`), tmux, and claude4. They must be on the same network.
+Every laptop needs macOS, Node 22.5 or newer (`node --version`), tmux, jq, Claude Code, and claude4. For a LAN hub they must be on the same network. If a laptop doesn't have claude4 yet, install the copy in this repo after `npm install`:
+
+```sh
+tools/claude4/install.sh
+```
+
+It puts `claude4` and `c4` in `~/.local/bin` and won't overwrite an existing install unless you pass `--force`. Then start the team with `claude4 --web` (or `claude4` in Terminal).
+
+Claude Code can do the whole setup: open it in the project folder and say "set this up for me". It follows CLAUDE.md.
 
 ## Host the hub (once)
 
@@ -58,13 +66,19 @@ To see who has access: `bin/agentlink-hub list`. To take it away: `bin/agentlink
 
 ## Join from another laptop
 
-Copy the project folder without `node_modules` and `data`. For example, from the hub laptop:
+Get the project into `~/agentlink` on sam's laptop. The GitHub repository is private, so the owner adds sam as a collaborator first; until pull request #1 is merged, the code is on the `feat/cloud-calls-usage` branch:
+
+```sh
+git clone -b feat/cloud-calls-usage https://github.com/baldman123/agentlink.git ~/agentlink
+```
+
+Copying the folder works too, as long as `node_modules` and `data` stay behind (`data` holds the host's master token):
 
 ```sh
 rsync -a --exclude node_modules --exclude data ~/agentlink/ sam@laptop2.local:agentlink/
 ```
 
-A zip or a git clone of the branch works just as well. Then, on sam's laptop, run the command the invite printed:
+Keep it at `~/agentlink`: the boss prompt that `c4` writes calls `~/agentlink/bin/agentlink`. Then, on sam's laptop, run the command the invite printed:
 
 ```sh
 cd ~/agentlink
@@ -79,6 +93,20 @@ With `--join`, the daemon finds the hub by its id even after the hub laptop's IP
 Open the app URL it prints. Every team that has joined shows up in the app, five sessions each. A third or fourth person does exactly the same: one `invite` on the hub laptop, one `team-up.sh` on theirs.
 
 What other people can see: everyone's sessions and tasks, the shared context, and the terminals of teams that turned on `--share-screens`. Messages are private to the people in them. Sam sees messages from and to sam's own agents, plus broadcasts to everyone, but not what alex and a third person send each other.
+
+## Join through the website
+
+If the owner runs the agentlink website, there's no hub laptop and nobody needs to be on the same network. The owner invites you with `bin/agentlink-cloud invite sam` (or from the Admin page) and sends you the site address and a personal access code. On your laptop, after `npm install`:
+
+```sh
+scripts/team-up.sh --user sam --hub-url https://<site>.vercel.app
+```
+
+It asks for the access code; paste it. The code is saved in `data/.access-code`, never in git. You can also sign in on the website with the same code. Leave out `--join` and `--host-hub`; with an `https://` address they're refused.
+
+Running the website itself (deploying `cloud/` to Vercel with a Supabase project) is the owner's job. The variables it needs are in `cloud/.env.example`, with placeholder values; the real ones go in `cloud/.env.local` and the Vercel project settings, never in git.
+
+`scripts/autostart.sh install` doesn't work in this mode yet: it looks for `data/.token` and stops with `no data/.token yet`.
 
 ## Moving from the old shared token
 

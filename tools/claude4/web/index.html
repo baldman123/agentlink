@@ -1,0 +1,830 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude4</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<style>
+:root{
+  --bg:#0a0c11; --card:#0f1117; --line:#212838; --line-2:#2c3548; --text:#d7dbe3; --muted:#7f879a; --dim:#4f586c;
+  --accent:#a7c7e7; --green:#9fdcb4; --yellow:#ecdc98; --cyan:#c4b5f4; --red:#f2a7a7;
+  --gap:56px; --pad:16px; --head:34px; --r:14px;
+  --orb:180px;    /* the boss orb's diameter, set from JS */
+  --notch:0px;    /* how far each corner is cut back around the orb */
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:radial-gradient(1200px 800px at 50% 50%,#111522 0%,var(--bg) 60%);color:var(--text);font:13px/1.4 Inter,system-ui,sans-serif;overflow:hidden}
+.court{position:fixed;inset:var(--pad);display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:var(--gap)}
+
+/* ── the four corners ── */
+.q{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+  transition:border-color .2s, box-shadow .2s;-webkit-mask:var(--mask);mask:var(--mask)}
+.q[data-slot="1"]{--mask:radial-gradient(circle at calc(100% + var(--gap)/2) calc(100% + var(--gap)/2),transparent var(--notch),#000 calc(var(--notch) + 1px))}
+.q[data-slot="2"]{--mask:radial-gradient(circle at calc(var(--gap)/-2) calc(100% + var(--gap)/2),transparent var(--notch),#000 calc(var(--notch) + 1px))}
+.q[data-slot="3"]{--mask:radial-gradient(circle at calc(100% + var(--gap)/2) calc(var(--gap)/-2),transparent var(--notch),#000 calc(var(--notch) + 1px));flex-direction:column-reverse}
+.q[data-slot="4"]{--mask:radial-gradient(circle at calc(var(--gap)/-2) calc(var(--gap)/-2),transparent var(--notch),#000 calc(var(--notch) + 1px));flex-direction:column-reverse}
+.q.focus{border-color:rgba(167,199,231,.55);box-shadow:0 0 0 1px rgba(167,199,231,.25),0 20px 60px -30px rgba(167,199,231,.35)}
+.q.alert{border-color:var(--red);animation:alert 1.2s ease-in-out infinite}
+@keyframes alert{50%{box-shadow:0 0 0 1px var(--red),0 0 40px -6px rgba(242,167,167,.7)}}
+.head{flex:none;height:var(--head);display:flex;align-items:center;gap:10px;padding:0 14px;border-bottom:1px solid var(--line);font-size:12px;white-space:nowrap;overflow:hidden;cursor:pointer;user-select:none}
+.q[data-slot="3"] .head,.q[data-slot="4"] .head{border-bottom:0;border-top:1px solid var(--line)}
+/* the port (where the dotted line lands) sits on the side facing the middle */
+.q[data-slot="1"] .port,.q[data-slot="3"] .port{order:99}
+.who{font:700 11px/1 "JetBrains Mono",monospace;letter-spacing:.12em;color:var(--muted)}
+.q.focus .who{color:var(--accent)}
+.dir{color:var(--dim);font-family:"JetBrains Mono",monospace;font-size:11px}
+.task{flex:1 1 auto;color:var(--text);overflow:hidden;text-overflow:ellipsis;min-width:0}
+.chip{flex:none;font:600 10.5px/1 "JetBrains Mono",monospace;padding:4px 7px;border-radius:999px;border:1px solid var(--line-2);color:var(--muted)}
+.chip.working{color:var(--yellow);border-color:rgba(236,220,152,.4);background:rgba(236,220,152,.08)}
+.chip.done{color:var(--green);border-color:rgba(159,220,180,.4);background:rgba(159,220,180,.08)}
+.chip.asking,.chip.waiting{color:var(--cyan);border-color:rgba(196,181,244,.4);background:rgba(196,181,244,.08)}
+.chip.blocked{color:var(--red);border-color:rgba(242,167,167,.45);background:rgba(242,167,167,.08)}
+.chip.needs-you{color:#fff;border-color:var(--red);background:rgba(242,167,167,.25)}
+.chip.ping{animation:ping .9s ease-out}
+@keyframes ping{0%{box-shadow:0 0 0 0 rgba(167,199,231,.6)}100%{box-shadow:0 0 0 12px rgba(167,199,231,0)}}
+.port{width:7px;height:7px;border-radius:50%;background:var(--line-2);flex:none;transition:background .3s, box-shadow .3s}
+.port.live{background:var(--accent);box-shadow:0 0 10px var(--accent)}
+
+/* ── a terminal: tmux's own screen and history, drawn as text ── */
+.term{position:relative;flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:8px 12px 10px;cursor:text;
+  font-family:"JetBrains Mono",Menlo,monospace;font-size:12px;line-height:1.25;color:var(--text);
+  scrollbar-width:thin;scrollbar-color:#2c3548 transparent}
+.term::-webkit-scrollbar{width:8px}.term::-webkit-scrollbar-thumb{background:#2c3548;border-radius:4px}
+.term pre{margin:0;font:inherit;white-space:pre;tab-size:8}
+.term .scr{position:relative}
+.term .screen{white-space:normal}
+.term .screen > div{white-space:pre;min-height:1.25em}
+.term .screen > div[hidden]{display:none}
+.term .cur{position:absolute;width:1ch;height:1.25em;background:var(--accent);opacity:0;mix-blend-mode:screen;pointer-events:none}
+.focused .term .cur.on{opacity:.85;animation:blink 1.1s steps(1) infinite}
+@keyframes blink{50%{opacity:.25}}
+.term .waiting{color:var(--dim);font-size:12px}
+.jump{all:unset;position:absolute;right:14px;bottom:12px;z-index:2;font:600 11px "JetBrains Mono",monospace;color:var(--text);background:#1a2030;border:1px solid var(--line-2);border-radius:999px;padding:5px 10px;cursor:pointer;display:none}
+.q.scrolled .jump,.panel.scrolled .jump{display:block}
+.q[data-slot="3"] .jump,.q[data-slot="4"] .jump{bottom:calc(var(--head) + 12px)}
+#proxyHost{position:fixed;left:-10000px;top:0;width:400px;height:100px;overflow:hidden}
+
+/* ── flow lines ── */
+svg.flow{position:fixed;inset:0;width:100vw;height:100vh;pointer-events:none;z-index:4;overflow:visible}
+.wire{fill:none;stroke:rgba(150,162,190,.38);stroke-width:2;stroke-dasharray:2 7;stroke-linecap:round;transition:stroke .4s,opacity .4s}
+.wire.working{stroke:rgba(167,199,231,.8);animation:flow 1.4s linear infinite}
+.wire.back{stroke:rgba(159,220,180,.75)}
+.wire.hidden{opacity:0}
+@keyframes flow{to{stroke-dashoffset:-18}}
+@keyframes flowback{to{stroke-dashoffset:18}}
+.pulse{filter:url(#glow)}
+.tag{font:600 11px "JetBrains Mono",monospace}
+
+/* ── the boss orb ── */
+.orb{position:fixed;left:50%;top:50%;z-index:5;width:var(--orb);height:var(--orb);transform:translate(-50%,-50%);border-radius:50%;cursor:pointer;
+  background:radial-gradient(circle at 50% 35%,#171c29 0%,#0d1018 70%);border:1.5px solid rgba(167,199,231,.55);
+  box-shadow:0 0 0 8px rgba(167,199,231,.05),0 0 60px -10px rgba(167,199,231,.35),inset 0 0 40px rgba(0,0,0,.5);
+  display:grid;place-items:center;text-align:center;transition:box-shadow .3s,border-color .3s,transform .2s;user-select:none}
+.orb:hover{transform:translate(-50%,-50%) scale(1.03)}
+.orb .diamond{font-size:24px;color:var(--accent);line-height:1}
+.orb.call .diamond{animation:breathe 2.4s ease-in-out infinite}
+@keyframes breathe{50%{transform:scale(1.15);text-shadow:0 0 18px var(--accent)}}
+.orb .title{font:700 12px/1 "JetBrains Mono",monospace;letter-spacing:.16em;color:var(--accent);margin-top:8px}
+.orb .sub{font:500 10.5px/1.35 "JetBrains Mono",monospace;color:var(--muted);margin-top:7px;padding:0 18px}
+.orb .sub.busy{color:var(--yellow)}
+.orb .calls{display:none;margin-top:9px;font:700 10.5px/1 "JetBrains Mono",monospace;color:#0b0e15;background:var(--red);border-radius:999px;padding:5px 9px}
+.orb.hot{border-color:var(--red);animation:calls 1.6s ease-in-out infinite}
+.orb.hot .calls{display:inline-block}
+@keyframes calls{50%{box-shadow:0 0 0 8px rgba(242,167,167,.08),0 0 70px -6px rgba(242,167,167,.6),inset 0 0 40px rgba(0,0,0,.5)}}
+
+/* ── the boss panel: opens from the orb ── */
+.backdrop{position:fixed;inset:0;z-index:6;background:rgba(5,7,11,.55);backdrop-filter:blur(2px);opacity:0;pointer-events:none;transition:opacity .25s}
+.backdrop.on{opacity:1;pointer-events:auto}
+.panel{position:fixed;left:50%;top:50%;z-index:7;width:min(1060px,82vw);height:min(760px,84vh);transform:translate(-50%,-50%) scale(.92);opacity:0;pointer-events:none;
+  display:flex;flex-direction:column;background:#0d1018;border:1.5px solid rgba(167,199,231,.5);border-radius:22px;
+  box-shadow:0 0 0 8px rgba(167,199,231,.05),0 40px 120px -30px rgba(0,0,0,.9),0 0 80px -20px rgba(167,199,231,.35);transition:transform .3s cubic-bezier(.2,.8,.2,1),opacity .25s}
+.panel.on{transform:translate(-50%,-50%) scale(1);opacity:1;pointer-events:auto}
+.phead{flex:none;display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.phead button{all:unset;cursor:pointer;font:700 11px/1 "JetBrains Mono",monospace;letter-spacing:.12em;color:var(--muted);padding:7px 11px;border-radius:999px;border:1px solid transparent}
+.phead button.on{color:var(--accent);border-color:rgba(167,199,231,.45);background:rgba(167,199,231,.08)}
+.phead button b{display:inline-grid;place-items:center;min-width:17px;height:17px;margin-left:6px;padding:0 4px;border-radius:999px;background:var(--line-2);color:var(--text);font-size:10px;letter-spacing:0}
+.phead button b.hot{background:var(--red);color:#0b0e15}
+.phead .close{margin-left:auto;letter-spacing:0;font-size:15px;color:var(--muted)}
+.phead .close:hover{color:var(--text)}
+.pbody{position:relative;flex:1;min-height:0;display:flex}
+.pbody > *{flex:1;min-width:0}
+.bossbox{display:flex;flex-direction:column}
+.panel [hidden]{display:none!important}
+
+/* ── the owner's inbox ── */
+.inbox{overflow:auto;display:flex;flex-direction:column;gap:10px;padding:16px;scrollbar-width:thin;scrollbar-color:#2c3548 transparent}
+.inbox .empty{margin:auto;color:var(--dim);font:13px "JetBrains Mono",monospace;text-align:center}
+.card{flex:none;background:#0b0e15;border:1px solid var(--line-2);border-radius:12px;padding:12px 14px;font-size:13px;max-width:820px;width:100%;margin:0 auto}
+.card.question{border-color:rgba(196,181,244,.35)}
+.card.perm{border-color:rgba(242,167,167,.35)}
+.card .from{font:700 10.5px/1 "JetBrains Mono",monospace;letter-spacing:.1em;color:var(--muted);margin-bottom:8px}
+.card.perm .from b{color:var(--red)} .card.question .from b{color:var(--cyan)}
+.card pre{margin:0 0 8px;white-space:pre-wrap;word-break:break-word;font:12.5px/1.45 "JetBrains Mono",monospace;color:var(--text);max-height:14em;overflow:auto}
+.card .why{color:var(--muted);font-size:12px;margin-bottom:10px}
+.card .sum{margin:0 0 8px;font:600 14.5px/1.45 Inter,sans-serif;color:var(--text)}
+.card details{margin:0 0 8px}
+.card details>summary{cursor:pointer;color:var(--muted);font:11.5px "JetBrains Mono",monospace;margin-bottom:6px}
+.autobar{flex:none;display:flex;gap:10px;align-items:center;max-width:820px;width:100%;margin:0 auto;padding:10px 14px;border:1px dashed var(--line-2);border-radius:12px;color:var(--muted);font-size:12.5px}
+.autobar.on{border-style:solid;border-color:rgba(167,199,231,.5);color:var(--text)}
+.autobar span{flex:1}
+.autobar button{all:unset;cursor:pointer;font:700 12px/1 Inter,sans-serif;padding:7px 12px;border-radius:8px;background:var(--line-2);color:var(--text)}
+.orb .auto{display:inline-block;margin-top:7px;font:700 9.5px/1 "JetBrains Mono",monospace;letter-spacing:.08em;color:#0b0e15;background:#a7c7e7;border-radius:999px;padding:4px 8px}
+.card .acts{display:flex;gap:8px;align-items:center}
+.card button{all:unset;cursor:pointer;font:700 12px/1 Inter,sans-serif;padding:8px 14px;border-radius:8px}
+.card .ok{background:var(--green);color:#0b0e15}
+.card .no{border:1px solid rgba(242,167,167,.5);color:var(--red)}
+.card .send{background:var(--cyan);color:#0b0e15}
+.card input,.card textarea{all:unset;box-sizing:border-box;flex:1;min-width:0;background:#141925;border:1px solid var(--line-2);border-radius:8px;padding:8px 10px;font:13px Inter,sans-serif;color:var(--text)}
+.card textarea{width:100%;min-height:60px;margin-bottom:8px;resize:vertical}
+.card input:focus,.card textarea:focus{border-color:var(--accent)}
+
+/* ── people: who's here, and the owner's PEOPLE tab ── */
+.here{position:fixed;left:calc(var(--pad) + 6px);top:50%;transform:translateY(-50%);z-index:5;max-width:calc(50vw - var(--orb)/2 - 40px);
+  display:flex;align-items:center;gap:10px;overflow:hidden;white-space:nowrap;font:600 10.5px/1 "JetBrains Mono",monospace;color:var(--muted)}
+.here .lbl{letter-spacing:.14em;color:var(--dim)}
+.here span.p{display:inline-flex;align-items:center;gap:5px}
+.here span.p i{font-style:normal;color:var(--dim);font-weight:400}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--line-2);flex:none}
+.dot.on{background:var(--green);box-shadow:0 0 8px rgba(159,220,180,.7)}
+.me{position:fixed;right:calc(var(--pad) + 6px);top:50%;transform:translateY(-50%);z-index:5;font:600 10.5px/1 "JetBrains Mono",monospace;letter-spacing:.1em;
+  color:var(--cyan);border:1px solid rgba(196,181,244,.4);background:rgba(196,181,244,.08);border-radius:999px;padding:5px 9px}
+.me[hidden]{display:none}
+.card .note{color:var(--muted);font:12px "JetBrains Mono",monospace}
+.people{overflow:auto;display:flex;flex-direction:column;gap:10px;padding:16px;scrollbar-width:thin;scrollbar-color:#2c3548 transparent}
+.people h3{margin:6px auto 0;max-width:820px;width:100%;font:700 10.5px/1 "JetBrains Mono",monospace;letter-spacing:.14em;color:var(--muted)}
+.seg{display:inline-flex;border:1px solid var(--line-2);border-radius:8px;overflow:hidden;flex:none}
+.card .seg button{border-radius:0;padding:8px 11px;color:var(--muted);font:600 11.5px/1 "JetBrains Mono",monospace}
+.card .seg button.on{background:rgba(167,199,231,.12);color:var(--accent)}
+.card .add{background:var(--accent);color:#0b0e15}
+.card .ghost{border:1px solid var(--line-2);color:var(--muted)}
+.card .ghost:hover{color:var(--text)}
+.card select{all:unset;box-sizing:border-box;flex:none;max-width:260px;background:#141925;border:1px solid var(--line-2);border-radius:8px;padding:8px 10px;font:12px "JetBrains Mono",monospace;color:var(--text);cursor:pointer}
+.invite{border-color:rgba(167,199,231,.5)}
+.invite .link{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#141925;border:1px solid var(--line-2);border-radius:8px;padding:8px 10px;font:12px "JetBrains Mono",monospace;color:var(--accent);user-select:all}
+.prow{display:flex;align-items:center;gap:12px}
+.prow .nm{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prow .seen{flex:1;color:var(--dim);font:11px "JetBrains Mono",monospace;white-space:nowrap}
+.card .no.sure{background:var(--red);color:#0b0e15}
+.gate{position:fixed;inset:0;z-index:20;display:grid;place-items:center;background:rgba(5,7,11,.85);font:13px "JetBrains Mono",monospace;color:var(--muted);text-align:center;padding:24px}
+.gate b{display:block;color:var(--red);letter-spacing:.14em;margin-bottom:10px}
+
+.toast{position:fixed;left:50%;bottom:10px;transform:translateX(-50%);z-index:9;font:12px "JetBrains Mono",monospace;color:var(--text);background:#11151f;border:1px solid var(--line);padding:7px 13px;border-radius:999px;opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+<div class="court" id="court"></div>
+<svg class="flow" id="flow"><defs>
+  <filter id="glow" x="-200%" y="-200%" width="500%" height="500%"><feGaussianBlur stdDeviation="3.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs></svg>
+<div class="orb call" id="orb" role="button" tabindex="0"></div>
+<div class="backdrop" id="backdrop"></div>
+<section class="panel" id="panel" aria-label="The boss">
+  <div class="phead">
+    <button data-tab="chat" id="tabChat">◆ BOSS</button>
+    <button data-tab="inbox" id="tabInbox">YOUR CALLS<b id="badge">0</b></button>
+    <button data-tab="people" id="tabPeople" hidden>PEOPLE<b id="peopleBadge">0</b></button>
+    <button class="close" id="closePanel" title="Close (the boss keeps working)">✕</button>
+  </div>
+  <div class="pbody"><div id="bossBox" class="bossbox"></div><div class="inbox" id="inbox" hidden></div><div class="people" id="people" hidden></div></div>
+</section>
+<div class="here" id="here"></div>
+<div class="me" id="meTag" hidden></div>
+<div id="proxyHost"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const SESSION = new URLSearchParams(location.search).get("s") || "claude4web";
+const PAL = ["#1c2028","#f2a7a7","#a8dcb8","#ecdc98","#a7c7e7","#cbb6f2","#9fd8d2","#d6dde8","#6a7383","#f7bcbc","#bfe8cb","#f5ebb8","#c0d8f0","#dccbf7","#b8e5e0","#f4f7fb"];
+const FG = "#d7dbe3", BG = "#0f1117";
+const COLORS = {assign:"#a7c7e7",tell:"#a7c7e7",done:"#9fdcb4",ask:"#c4b5f4",blocked:"#f2a7a7",boss:"#a7c7e7",msg:"#f4b8d0",perm:"#c4b5f4",approve:"#9fdcb4",deny:"#f2a7a7",escalate:"#f2a7a7",answer:"#9fdcb4"};
+const $ = (id) => document.getElementById(id);
+const court = $("court"), flow = $("flow"), orb = $("orb"), panel = $("panel"), backdrop = $("backdrop"), toastEl = $("toast");
+const views = new Map();   // slot -> TermView
+let slots = [], ws, focusSlot = 1, inbox = [], autopilot = false, tab = "chat", seenInbox = new Set(), panelOpen = false;
+// Who is looking at this page. The server decides; an older server without /api/me is local-only, so owner.
+let me = {name: "the owner", role: "owner", owner: true}, online = [], locked = false;
+const canType = () => me.owner || me.role === "full";
+
+const enc = new TextEncoder();
+const bytesToB64 = (u8) => { let s = ""; for (const b of u8) s += String.fromCharCode(b); return btoa(s); };
+const toast = (text, ms = 2800) => { toastEl.textContent = text; toastEl.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => toastEl.classList.remove("show"), ms); };
+const esc = (t) => String(t ?? "").replace(/[&<>]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"})[c]);
+function send(msg) { if (ws?.readyState === 1) ws.send(JSON.stringify(msg)); }
+
+/* ── ANSI (SGR only: tmux's capture-pane -e emits nothing else) to HTML ── */
+function c256(n) {
+  if (n < 16) return PAL[n];
+  if (n >= 232) { const v = 8 + (n - 232) * 10; return `rgb(${v},${v},${v})`; }
+  n -= 16; const s = [0, 95, 135, 175, 215, 255];
+  return `rgb(${s[Math.floor(n / 36)]},${s[Math.floor(n / 6) % 6]},${s[n % 6]})`;
+}
+// One line to HTML, starting from the SGR state the previous line ended in.
+function lineToHtml(line, start) {
+  let st = {...start}, html = "", i = 0, run = "";
+  const flush = () => {
+    if (!run) return;
+    let fg = st.fg, bg = st.bg;
+    if (st.inv) { [fg, bg] = [bg || BG, fg || FG]; }
+    const css = [];
+    if (fg) css.push(`color:${fg}`);
+    if (bg) css.push(`background:${bg}`);
+    if (st.bold) css.push("font-weight:700");
+    if (st.dim) css.push("opacity:.6");
+    if (st.it) css.push("font-style:italic");
+    if (st.ul || st.st) css.push(`text-decoration:${st.ul ? "underline" : ""} ${st.st ? "line-through" : ""}`);
+    html += css.length ? `<span style="${css.join(";")}">${esc(run)}</span>` : esc(run);
+    run = "";
+  };
+  while (i < line.length) {
+    const ch = line[i];
+    if (ch === "\x1b") {
+      const m = /^\x1b\[([0-9;:]*)m/.exec(line.slice(i, i + 64));
+      if (m) {
+        flush();
+        const ps = m[1] === "" ? [0] : m[1].split(/[;:]/).map(Number);
+        for (let k = 0; k < ps.length; k++) {
+          const v = ps[k];
+          if (v === 0) st = {};
+          else if (v === 1) st.bold = true; else if (v === 2) st.dim = true; else if (v === 3) st.it = true;
+          else if (v === 4) st.ul = true; else if (v === 7) st.inv = true; else if (v === 9) st.st = true;
+          else if (v === 22) st.bold = st.dim = false; else if (v === 23) st.it = false; else if (v === 24) st.ul = false;
+          else if (v === 27) st.inv = false; else if (v === 29) st.st = false;
+          else if (v >= 30 && v <= 37) st.fg = PAL[v - 30]; else if (v >= 90 && v <= 97) st.fg = PAL[v - 82];
+          else if (v >= 40 && v <= 47) st.bg = PAL[v - 40]; else if (v >= 100 && v <= 107) st.bg = PAL[v - 92];
+          else if (v === 39) st.fg = null; else if (v === 49) st.bg = null;
+          else if (v === 38 || v === 48) {
+            let col = null;
+            if (ps[k + 1] === 5) { col = c256(ps[k + 2]); k += 2; }
+            else if (ps[k + 1] === 2) { col = `rgb(${ps[k + 2]},${ps[k + 3]},${ps[k + 4]})`; k += 4; }
+            if (v === 38) st.fg = col; else st.bg = col;
+          }
+        }
+        i += m[0].length; continue;
+      }
+      const other = /^\x1b(\[[0-9;?]*[A-Za-z]|\][^\x07]*\x07|.)/.exec(line.slice(i, i + 64));
+      i += other ? other[0].length : 1; continue;
+    }
+    run += ch; i++;
+  }
+  flush();
+  return {html, end: st};
+}
+function linesToHtml(lines) {
+  let st = {};
+  return lines.map((l) => { const r = lineToHtml(l, st); st = r.end; return r.html; }).join("\n");
+}
+const plain = (l) => l.replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, "").trim();
+
+/* ── one terminal view: tmux's history and screen as text, keys through a hidden xterm ── */
+class TermView {
+  constructor(slot, host, scrollHost) {
+    this.slot = slot; this.cols = 80; this.rows = 24; this.hist = []; this.pending = []; this.frame = 0;
+    this.el = document.createElement("div"); this.el.className = "term";
+    this.el.innerHTML = `<pre class="hist"></pre><div class="scr"><pre class="screen"><span class="waiting">starting…</span></pre><span class="cur"></span></div>`;
+    host.appendChild(this.el);
+    this.histEl = this.el.querySelector(".hist"); this.scrEl = this.el.querySelector(".screen"); this.cur = this.el.querySelector(".cur");
+    this.scrollHost = scrollHost || host;
+    this.jump = document.createElement("button"); this.jump.className = "jump"; this.jump.textContent = "↓ latest";
+    this.scrollHost.appendChild(this.jump);
+    this.jump.onclick = () => { this.el.scrollTop = this.el.scrollHeight; this.focus(); };
+    this.el.addEventListener("scroll", () => this.scrollHost.classList.toggle("scrolled", !this.atBottom()));
+    // Keys: a hidden xterm turns key presses (arrows, Esc, Ctrl, paste…) into the bytes a terminal sends.
+    const ph = document.createElement("div"); $("proxyHost").appendChild(ph);
+    this.proxy = new Terminal({cols: 80, rows: 4});
+    this.proxy.open(ph);
+    this.proxy.write("\x1b[?2004h");   // Claude Code wants bracketed paste
+    this.proxy.onData((d) => {
+      if (!canType()) { toast("Watch only: you can see the Claudes but not type to them."); return; }
+      send({t: "in", slot, d: bytesToB64(enc.encode(d))}); this.el.scrollTop = this.el.scrollHeight;
+    });
+    this.proxy.textarea?.addEventListener("focus", () => setFocus(slot));
+    // Click to type; drag to select and copy text as usual.
+    this.el.addEventListener("mouseup", () => { if (!String(getSelection())) this.focus(); });
+  }
+  atBottom() { return this.el.scrollTop + this.el.clientHeight >= this.el.scrollHeight - 6; }
+  focus() { this.proxy.focus(); setFocus(this.slot); }
+  update(m) {
+    this.pending.push(m);
+    if (!this.frame && !document.hidden) this.frame = requestAnimationFrame(() => this.flush());
+  }
+  flush() {
+    this.frame = 0;
+    const stick = this.atBottom();
+    const msgs = this.pending; this.pending = [];
+    if (!msgs.length) return;
+    let sizeChanged = false;
+    for (const m of msgs) {
+      if (m.cols !== this.cols || m.rows !== this.rows) sizeChanged = true;
+      this.cols = m.cols; this.rows = m.rows; this.cx = m.cx; this.cy = m.cy; this.cursorOn = !!m.cursor;
+      if (m.reset) { this.hist = m.hist.slice(); this.histEl.innerHTML = this.hist.length ? linesToHtml(this.hist) + "\n" : ""; }
+      else if (m.hist.length) {
+        this.hist.push(...m.hist);
+        if (this.hist.length > 3500) { this.hist.splice(0, this.hist.length - 3000); this.histEl.innerHTML = linesToHtml(this.hist) + "\n"; }
+        else this.histEl.insertAdjacentHTML("beforeend", linesToHtml(m.hist) + "\n");
+      }
+      if (m.screen) this.setScreen(m.screen);
+      else this.patchScreen(m.patch, m.len);
+    }
+    this.layoutScreen();
+    if (sizeChanged) this.fit();
+    if (stick) this.el.scrollTop = this.el.scrollHeight;
+  }
+  // The screen keeps one <div> per row, so a change touches only that row.
+  setScreen(lines) {
+    if (!this.rowsEl) { this.scrEl.innerHTML = ""; this.rowsEl = []; this.raw = []; this.ends = []; }
+    this.patchScreen(lines.map((l, i) => [i, l]), lines.length, true);
+  }
+  patchScreen(patch, len, all = false) {
+    if (!this.rowsEl) { this.scrEl.innerHTML = ""; this.rowsEl = []; this.raw = []; this.ends = []; }
+    while (this.rowsEl.length < len) { const d = document.createElement("div"); this.scrEl.appendChild(d); this.rowsEl.push(d); this.raw.push(null); this.ends.push({}); }
+    while (this.rowsEl.length > len) { this.rowsEl.pop().remove(); this.raw.pop(); this.ends.pop(); }
+    const changed = new Map(patch);
+    // Re-render changed rows; a row whose colors run on into the next re-renders that one too.
+    let carry = false;
+    for (let i = 0; i < len; i++) {
+      const line = changed.has(i) ? changed.get(i) : this.raw[i];
+      if (!all && !changed.has(i) && !carry) continue;
+      const before = JSON.stringify(this.ends[i]);
+      const r = lineToHtml(line ?? "", i ? this.ends[i - 1] : {});
+      this.raw[i] = line ?? ""; this.ends[i] = r.end;
+      this.rowsEl[i].innerHTML = r.html || " ";
+      carry = JSON.stringify(r.end) !== before;
+    }
+  }
+  // Hide the blank rows below the last text (tall panes) and fold long blank stretches to one row.
+  layoutScreen() {
+    if (!this.rowsEl) return;
+    let last = this.raw.length - 1;
+    while (last > this.cy && last >= 0 && !plain(this.raw[last])) last--;
+    const cut = Math.max(last, this.cy);
+    let blank = 0, cyShown = 0;
+    for (let i = 0; i < this.rowsEl.length; i++) {
+      const empty = !plain(this.raw[i] || "") && i !== this.cy;
+      const hide = i > cut || (empty && ++blank > 1);
+      if (!empty) blank = 0;
+      if (this.rowsEl[i].hidden !== hide) this.rowsEl[i].hidden = hide;
+      if (i < this.cy && !hide) cyShown++;
+    }
+    this.cur.style.left = `${this.cx}ch`; this.cur.style.top = `${cyShown * 1.25}em`;
+    this.cur.classList.toggle("on", this.cursorOn);
+  }
+  // Size the font so a full pane row fills the width. JetBrains Mono's advance is 0.6em.
+  fit() {
+    const W = this.el.clientWidth - 24;
+    if (W < 40) return;
+    const max = this.slot === 0 ? 17 : 14;
+    this.el.style.fontSize = `${Math.max(6, Math.min(max, Math.floor(W / (this.cols * 0.6) * 4) / 4))}px`;
+  }
+}
+
+/* ── corners ── */
+for (const slot of [1, 2, 3, 4]) {
+  const el = document.createElement("section");
+  el.className = "q"; el.dataset.slot = slot;
+  el.innerHTML = `<div class="head"><span class="port"></span><span class="who">WORKER ${slot}</span><span class="dir"></span><span class="task"></span><span class="chip">idle</span></div>`;
+  court.appendChild(el);
+  views.set(slot, new TermView(slot, el));
+  el.querySelector(".head").onclick = () => views.get(slot).focus();
+}
+function bossView() {
+  if (!views.has(0)) views.set(0, new TermView(0, $("bossBox"), panel));
+  return views.get(0);
+}
+function setFocus(slot) {
+  focusSlot = slot;
+  document.querySelectorAll(".q").forEach((q) => { const on = +q.dataset.slot === slot; q.classList.toggle("focus", on); q.classList.toggle("focused", on); });
+  panel.classList.toggle("focused", slot === 0);
+}
+
+/* ── the orb and the boss panel ── */
+const bossPresent = () => slots.some((s) => s.slot === 0);
+function orbSize() { return Math.round(Math.max(150, Math.min(200, Math.min(innerWidth, innerHeight) * 0.21))); }
+function renderOrb() {
+  const d = orbSize();
+  document.documentElement.style.setProperty("--orb", d + "px");
+  document.documentElement.style.setProperty("--notch", d / 2 + 12 + "px");
+  const present = bossPresent(), n = inbox.length;
+  orb.classList.toggle("hot", n > 0);
+  const status = present ? bossStatus() : null;
+  orb.innerHTML = present
+    ? `<div><div class="diamond">◆</div><div class="title">BOSS</div><div class="sub ${status.busy ? "busy" : ""}">${esc(status.text)}</div><div class="calls">${n} call${n === 1 ? "" : "s"} for ${me.owner ? "you" : "the owner"}</div>${autopilot ? `<div class="auto" title="The boss decides the owner's calls">AUTOPILOT</div>` : ""}</div>`
+    : n ? `<div><div class="diamond">◆</div><div class="title">${me.owner ? "YOUR CALLS" : "CALLS"}</div><div class="calls">${n} waiting</div><div class="sub">${me.owner ? "click to answer" : "waiting on the owner"}</div></div>`
+    : canType() ? `<div><div class="diamond">◆</div><div class="title">CALL THE BOSS</div><div class="sub">a fifth Claude that runs the other four</div></div>`
+        : `<div><div class="diamond">◆</div><div class="title">NO BOSS</div><div class="sub">watch only: you can't call the boss</div></div>`;
+  orb.classList.toggle("call", !present && canType());
+  $("badge").textContent = n; $("badge").classList.toggle("hot", n > 0 && me.owner);
+  $("tabInbox").firstChild.textContent = me.owner ? "YOUR CALLS" : "CALLS";
+  $("tabPeople").hidden = !me.owner;
+  $("tabChat").hidden = !present;
+  requestAnimationFrame(layoutFlow);
+}
+function bossStatus() {
+  const v = views.get(0); if (!v) return {text: "starting…", busy: true};
+  // Only the bottom of the screen says what the boss is doing now; older prompts sit higher up.
+  const text = (v.raw || []).map(plain).filter(Boolean).slice(-12).join("\n");
+  if (/Do you want to proceed\?|Enter to confirm/.test(text)) return {text: "waiting on a prompt", busy: true};
+  if (/esc to interrupt/.test(text)) return {text: "working…", busy: true};
+  return {text: canType() ? "click to talk" : "click to watch", busy: false};
+}
+let statusTimer;
+function renderOrbStatus() {
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => {
+    const sub = orb.querySelector(".sub");
+    if (sub && bossPresent()) { const s = bossStatus(); sub.textContent = s.text; sub.classList.toggle("busy", s.busy); }
+  }, 300);
+}
+orb.onclick = () => {
+  if (!bossPresent() && !inbox.length) return canType() ? callBoss() : toast("Watch only: you can't call the boss.");
+  openPanel(inbox.length ? "inbox" : "chat");
+};
+orb.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); orb.onclick(); } };
+function openPanel(which) {
+  panelOpen = true; panel.classList.add("on"); backdrop.classList.add("on");
+  showTab(which || (bossPresent() ? "chat" : "inbox"));
+}
+function closePanel() {
+  panelOpen = false; panel.classList.remove("on"); backdrop.classList.remove("on");
+  views.get(focusSlot === 0 ? 1 : focusSlot)?.focus();
+}
+$("closePanel").onclick = closePanel;
+backdrop.onclick = closePanel;
+document.querySelectorAll(".phead [data-tab]").forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
+function showTab(which) {
+  if (which === "chat" && !bossPresent()) which = "inbox";
+  if (which === "people" && !me.owner) which = "inbox";
+  tab = which;
+  document.querySelectorAll(".phead [data-tab]").forEach((b) => b.classList.toggle("on", b.dataset.tab === which));
+  $("bossBox").hidden = which !== "chat"; $("inbox").hidden = which !== "inbox"; $("people").hidden = which !== "people";
+  if (which === "people") loadPeople();
+  if (which === "chat") { const v = bossView(); requestAnimationFrame(() => { v.fit(); v.el.scrollTop = v.el.scrollHeight; v.focus(); }); }
+}
+async function callBoss() {
+  if (!canType()) return toast("Watch only: you can't call the boss.");
+  toast("Calling the boss…");
+  const r = await post("/api/boss", {});
+  if (!r.ok) toast(r.message || "Couldn't start the boss.");
+}
+
+/* ── the owner's inbox ── */
+function renderInbox() {
+  const box = $("inbox");
+  const fresh = inbox.filter((it) => !seenInbox.has(it.id));
+  fresh.forEach((it) => seenInbox.add(it.id));
+  if (fresh.length && me.owner) toast(`⚠ ${fresh.length === 1 ? "Something needs" : `${fresh.length} things need`} you. Click the orb in the middle.`, 5000);
+  const keep = new Set(inbox.map((it) => it.id));
+  box.querySelectorAll(".card").forEach((c) => { if (!keep.has(c.dataset.id)) c.remove(); });
+  box.querySelector(".empty")?.remove();
+  renderAutobar(box);
+  if (!inbox.length) {
+    box.insertAdjacentHTML("beforeend", `<div class="empty">Nothing needs you right now.</div>`);
+    if (!me.owner) box.lastChild.textContent = "Nothing is waiting on the owner.";
+    if (panelOpen && tab === "inbox" && bossPresent()) showTab("chat");
+    return;
+  }
+  for (const it of inbox) {
+    if (box.querySelector(`.card[data-id="${it.id}"]`)) continue;
+    const who = it.from === 0 ? "THE BOSS" : `WORKER ${it.from}`;
+    const card = document.createElement("div");
+    card.className = `card ${it.kind}`; card.dataset.id = it.id;
+    // Only the owner answers calls (the server refuses anyone else), so others just see what's waiting.
+    const ro = `<div class="note">Waiting on the owner. Only they can answer this.</div>`;
+    if (!me.owner) {
+      card.innerHTML = `<div class="from"><b>${it.kind === "perm" ? "●" : "?"}</b> ${who} · ${it.kind === "perm" ? "WANTS TO" : "ASKS"}</div>${callBody(it)}
+        ${it.why ? `<div class="why">${esc(it.why)}</div>` : ""}${ro}`;
+    } else if (it.kind === "perm") {
+      card.innerHTML = `<div class="from"><b>●</b> ${who} · WANTS TO</div>${callBody(it)}
+        <div class="why">${esc(it.why)}</div>
+        <div class="acts"><button class="ok">Approve</button><button class="no">Deny</button><input placeholder="why not (optional)"></div>`;
+      card.querySelector(".ok").onclick = () => decide(it.id, "approve", "", card);
+      card.querySelector(".no").onclick = () => decide(it.id, "deny", card.querySelector("input").value, card);
+      card.querySelector("input").onkeydown = (e) => { if (e.key === "Enter") decide(it.id, "deny", e.target.value, card); };
+    } else {
+      card.innerHTML = `<div class="from"><b>?</b> ${who} · ASKS</div>${callBody(it)}
+        <textarea placeholder="Your answer…  (⌘↵ to send)"></textarea><div class="acts"><button class="send">Send answer</button></div>`;
+      const ta = card.querySelector("textarea");
+      card.querySelector(".send").onclick = () => answer(it.id, ta.value, card);
+      ta.onkeydown = (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) answer(it.id, ta.value, card); };
+    }
+    box.appendChild(card);
+  }
+}
+// The plain-English sentence first; the raw command (or the question's specifics) folded underneath.
+function callBody(it) {
+  const sum = it.summary || "", detail = it.detail ?? "";
+  if (!sum) return `<pre>${esc(it.what)}</pre>`;
+  const label = it.kind === "perm" ? "Show the exact command" : "Details";
+  return `<p class="sum">${esc(sum)}</p>${detail && detail !== sum ? `<details><summary>${label}</summary><pre>${esc(detail)}</pre></details>` : ""}`;
+}
+function renderAutobar(box) {
+  let bar = box.querySelector(".autobar");
+  if (!bar) { bar = document.createElement("div"); bar.className = "autobar"; box.prepend(bar); }
+  bar.classList.toggle("on", autopilot);
+  bar.innerHTML = autopilot
+    ? `<span><b>Autopilot is on.</b> The boss decides everything that would come to ${me.owner ? "you" : "the owner"}, and logs it on the board. Merging or pushing into main stays blocked.</span>`
+    : `<span>Autopilot is off: important calls come to ${me.owner ? "you" : "the owner"} here.</span>`;
+  if (me.owner) {
+    const b = document.createElement("button");
+    b.textContent = autopilot ? "Turn off" : "Turn on";
+    b.onclick = async () => {
+      b.style.opacity = .5;
+      const r = await post("/api/autopilot", {on: !autopilot});
+      toast(r.ok ? r.message || "Done." : r.message || "That didn't go through.");
+      b.style.opacity = 1;
+    };
+    bar.appendChild(b);
+  }
+}
+async function post(url, body) {
+  return fetch(`${url}?s=${encodeURIComponent(SESSION)}`, {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(body)})
+    .then(async (r) => {
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 401) gate();
+      if (!r.ok) return {ok: false, message: j.message || j.error || (r.status === 403 ? "You don't have permission for that." : `The server said ${r.status}.`), ...j, ok: false};
+      return {ok: true, ...j};
+    }).catch(() => ({ok: false, message: "Couldn't reach the claude4 server."}));
+}
+async function decide(id, verdict, reason, card) {
+  card.style.opacity = .5;
+  const r = await post("/api/decide", {id, verdict, reason});
+  toast(r.ok ? (verdict === "approve" ? "Approved." : "Denied.") : r.message || "That didn't go through.");
+  if (!r.ok) card.style.opacity = 1;
+}
+async function answer(id, text, card) {
+  if (!text.trim()) return;
+  card.style.opacity = .5;
+  const r = await post("/api/answer", {id, text});
+  toast(r.ok ? "Answer sent." : r.message || "That didn't go through.");
+  if (!r.ok) card.style.opacity = 1;
+}
+
+/* ── people: who's here (everyone), and the PEOPLE tab (owner only) ── */
+const ROLE = {owner: "owner", full: "can type", watch: "watch only"};
+function renderHere() {
+  const list = online.length ? online : [];
+  $("here").innerHTML = list.length
+    ? `<span class="lbl">HERE</span>` + list.map((p) => `<span class="p"><span class="dot on"></span>${esc(p.name)}<i>${esc(ROLE[p.role] || p.role)}</i></span>`).join("")
+    : "";
+  const tag = $("meTag");
+  tag.hidden = me.owner;
+  tag.textContent = me.role === "watch" ? `${me.name} · WATCH ONLY` : `${me.name} · CAN TYPE`;
+}
+const ago = (t) => {
+  if (!t) return "never";
+  const ms = typeof t === "number" ? (t < 1e12 ? t * 1000 : t) : Date.parse(t);
+  if (!ms) return "never";
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+};
+let people = [], bases = [], bindHost = "", invite = null, newRole = "full", peopleTimer;
+async function loadPeople() {
+  if (!me.owner) return;
+  const r = await fetch(`/api/people?s=${encodeURIComponent(SESSION)}`).then((r) => (r.status === 401 ? (gate(), null) : r.ok ? r.json() : null)).catch(() => null);
+  if (r) { people = r.people || []; bases = r.bases || []; bindHost = r.host || ""; }
+  renderPeople(!r);
+  clearTimeout(peopleTimer);
+  if (panelOpen && tab === "people") peopleTimer = setTimeout(loadPeople, 15000);
+}
+function baseOptions() {
+  const list = [...bases];
+  if (!list.includes(location.origin)) list.push(location.origin);
+  return list;
+}
+function renderPeople(failed) {
+  const box = $("people");
+  const nOn = people.filter((p) => p.online).length;
+  $("peopleBadge").textContent = nOn; $("peopleBadge").hidden = !nOn;
+  // Don't wipe the form while the owner is typing a name.
+  const typing = box.contains(document.activeElement) && document.activeElement.tagName === "INPUT";
+  const nameNow = box.querySelector(".addname")?.value || "";
+  let html = "";
+  if (invite) {
+    const opts = baseOptions();
+    html += `<div class="card invite"><div class="from"><b style="color:var(--accent)">◆</b> INVITE LINK FOR ${esc(invite.name.toUpperCase())} · ${esc(ROLE[invite.role])}</div>
+      <div class="acts"><span class="link"></span><button class="add copy">Copy</button></div>
+      <div class="acts" style="margin-top:8px"><span class="note">Opened from</span><select class="base">${opts.map((b) => `<option value="${esc(b)}"${b === invite.base ? " selected" : ""}>${esc(b)}</option>`).join("")}</select>
+      <span class="note" style="flex:1">This is the only time the link is shown. Send it to ${esc(invite.name)} now.</span><button class="ghost done">Done</button></div>
+      ${bindHost === "127.0.0.1" || bindHost === "localhost" ? `<div class="note" style="margin-top:8px;color:var(--yellow)">The view only listens on this Mac right now, so LAN links won't open. Restart it with: claude4 --web --share</div>` : ""}</div>`;
+  }
+  if (!typing || !box.querySelector(".addcard")) {
+    html += `<div class="card addcard"><div class="from">ADD A PERSON</div>
+      <div class="acts"><input class="addname" placeholder="Their name" maxlength="40">
+      <span class="seg"><button data-r="full" class="${newRole === "full" ? "on" : ""}">can type</button><button data-r="watch" class="${newRole === "watch" ? "on" : ""}">watch only</button></span>
+      <button class="add go">Add person</button></div>
+      <div class="note" style="margin-top:8px">${newRole === "full" ? "Can type into every Claude, the boss too, and call the boss. Can't answer YOUR CALLS." : "Sees everything live. Can't type, call the boss or answer calls."}</div></div>`;
+  }
+  html += `<h3>PEOPLE${people.length ? ` · ${people.length}` : ""}</h3>`;
+  if (failed) html += `<div class="card"><div class="note">Couldn't load people from the server.</div></div>`;
+  else if (!people.length) html += `<div class="card"><div class="note">Nobody else has access yet. Add someone above and send them the link.</div></div>`;
+  for (const p of people) {
+    html += `<div class="card"><div class="prow" data-id="${esc(p.id)}"><span class="dot ${p.online ? "on" : ""}" title="${p.online ? "online now" : "offline"}"></span>
+      <span class="nm">${esc(p.name)}</span><span class="seg"><button data-r="full" class="${p.role === "full" ? "on" : ""}">can type</button><button data-r="watch" class="${p.role === "watch" ? "on" : ""}">watch only</button></span>
+      <span class="seen">${p.online ? "online now" : `last seen ${ago(p.lastSeen)}`} · added ${ago(p.created)}</span><button class="no revoke">Revoke</button></div></div>`;
+  }
+  if (typing && box.querySelector(".addcard")) {
+    // Keep the add form (and its focus); redraw everything around it.
+    const add = box.querySelector(".addcard");
+    [...box.children].forEach((c) => { if (c !== add) c.remove(); });
+    const tmp = document.createElement("div"); tmp.innerHTML = html;
+    const inv = tmp.querySelector(".invite"); if (inv) box.insertBefore(inv, add);
+    [...tmp.children].forEach((c) => { if (c !== inv) box.appendChild(c); });
+  } else {
+    box.innerHTML = html;
+    if (nameNow) box.querySelector(".addname").value = nameNow;
+  }
+  wirePeople(box);
+}
+function wirePeople(box) {
+  const inv = box.querySelector(".invite");
+  if (inv && invite) {
+    // Carry the session so the invite opens this team, not the default one.
+    const link = () => `${invite.base.replace(/\/$/, "")}/join?k=${encodeURIComponent(invite.token)}&s=${encodeURIComponent(SESSION)}`;
+    const show = () => { inv.querySelector(".link").textContent = link(); };
+    show();
+    inv.querySelector(".base").onchange = (e) => { invite.base = e.target.value; show(); };
+    inv.querySelector(".copy").onclick = () => copyText(link());
+    inv.querySelector(".done").onclick = () => { invite = null; renderPeople(); };
+  }
+  const add = box.querySelector(".addcard");
+  if (add) {
+    add.querySelectorAll(".seg button").forEach((b) => (b.onclick = () => {
+      newRole = b.dataset.r;
+      add.querySelectorAll(".seg button").forEach((x) => x.classList.toggle("on", x === b));
+      add.querySelector(".note").textContent = newRole === "full" ? "Can type into every Claude, the boss too, and call the boss. Can't answer YOUR CALLS." : "Sees everything live. Can't type, call the boss or answer calls.";
+    }));
+    const go = () => addPerson(add.querySelector(".addname"));
+    add.querySelector(".go").onclick = go;
+    add.querySelector(".addname").onkeydown = (e) => { if (e.key === "Enter") go(); };
+  }
+  box.querySelectorAll(".prow").forEach((row) => {
+    const id = row.dataset.id, p = people.find((x) => x.id === id);
+    row.querySelectorAll(".seg button").forEach((b) => (b.onclick = async () => {
+      if (!p || p.role === b.dataset.r) return;
+      const r = await post("/api/people/role", {id, role: b.dataset.r});
+      toast(r.ok ? `${p.name} is now ${ROLE[b.dataset.r]}.` : r.message || "That didn't go through.");
+      loadPeople();
+    }));
+    // Two clicks instead of a confirm() dialog.
+    const rv = row.querySelector(".revoke");
+    rv.onclick = async () => {
+      if (!rv.classList.contains("sure")) {
+        rv.classList.add("sure"); rv.textContent = "Revoke?";
+        setTimeout(() => { rv.classList.remove("sure"); rv.textContent = "Revoke"; }, 3500);
+        return;
+      }
+      const r = await post("/api/people/revoke", {id});
+      toast(r.ok ? `${p?.name || "They"} can't get in any more.` : r.message || "That didn't go through.");
+      loadPeople();
+    };
+  });
+}
+async function addPerson(input) {
+  const name = input.value.trim();
+  if (!name) { input.focus(); return toast("Give them a name first."); }
+  const r = await post("/api/people", {name, role: newRole});
+  if (!r.ok || !r.token) return toast(r.message || "Couldn't add them.");
+  const opts = baseOptions();
+  let base = opts[0];
+  try { if (r.link) base = new URL(r.link).origin; } catch {}
+  invite = {name, role: newRole, token: r.token, base};
+  input.value = "";
+  document.activeElement?.blur();
+  loadPeople();
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return toast("Link copied."); } catch {}
+  const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  const ok = document.execCommand("copy"); ta.remove();
+  toast(ok ? "Link copied." : "Couldn't copy. Select the link and copy it by hand.");
+}
+async function loadMe() {
+  const r = await fetch(`/api/me?s=${encodeURIComponent(SESSION)}`).catch(() => null);
+  if (r?.status === 401) return gate();
+  if (r?.ok) { const j = await r.json().catch(() => null); if (j) me = {name: j.name || "the owner", role: j.owner ? "owner" : j.role, owner: !!j.owner}; }
+  renderHere(); renderOrb();
+}
+// This browser's access was revoked (or its cookie expired): stop and say so.
+function gate() {
+  if (locked) return;
+  locked = true;
+  try { ws?.close(); } catch {}
+  document.body.insertAdjacentHTML("beforeend", `<div class="gate"><div><b>NO ACCESS</b>This browser can't see the claude4 view any more.<br>Ask the owner for a new invite link.</div></div>`);
+}
+
+/* ── dotted lines: orb → each corner, along the gutters ── */
+const wires = new Map();
+function portOf(slot) {
+  const r = court.querySelector(`.q[data-slot="${slot}"] .port`).getBoundingClientRect();
+  return [r.left + r.width / 2, r.top + r.height / 2];
+}
+function layoutFlow() {
+  const present = bossPresent(), cx = innerWidth / 2, cy = innerHeight / 2, R = orb.getBoundingClientRect().height / 2;
+  for (const slot of [1, 2, 3, 4]) {
+    const [px, py] = portOf(slot), top = slot <= 2, sy = top ? cy - R : cy + R, dir = slot % 2 ? -1 : 1, bend = 14;
+    const d = `M ${cx} ${sy} L ${cx} ${py + (top ? bend : -bend)} Q ${cx} ${py} ${cx + dir * bend} ${py} L ${px} ${py}`;
+    let w = wires.get(slot);
+    if (!w) { w = document.createElementNS("http://www.w3.org/2000/svg", "path"); w.classList.add("wire"); flow.appendChild(w); wires.set(slot, w); }
+    w.setAttribute("d", d);
+    w.classList.toggle("hidden", !present);
+  }
+}
+const scratch = document.createElementNS("http://www.w3.org/2000/svg", "path");
+scratch.style.display = "none"; flow.appendChild(scratch);
+function peerPath(a, b) {
+  const cx = innerWidth / 2, cy = innerHeight / 2, R = orb.getBoundingClientRect().height / 2 + 6;
+  const [ax, ay] = portOf(a), [bx, by] = portOf(b);
+  if ((a <= 2) === (b <= 2)) return `M ${ax} ${ay} L ${bx} ${by}`;
+  const aTop = a <= 2, sy = aTop ? cy - R : cy + R, ey = aTop ? cy + R : cy - R;
+  const sweep = aTop ? (b % 2 === 1 ? 0 : 1) : (b % 2 === 1 ? 1 : 0);
+  return `M ${ax} ${ay} L ${cx} ${ay} L ${cx} ${sy} A ${R} ${R} 0 0 ${sweep} ${cx} ${ey} L ${cx} ${by} L ${bx} ${by}`;
+}
+function pulse(from, to, kind, text) {
+  if (panelOpen) return;
+  const peer = from !== 0 && to !== 0, worker = peer ? to : (from === 0 ? to : from);
+  let w, toWorker = from === 0;
+  if (peer) { scratch.setAttribute("d", peerPath(from, to)); w = scratch.cloneNode(); w.style.display = "none"; flow.appendChild(w); toWorker = true; }
+  else { w = wires.get(worker); if (!w || w.classList.contains("hidden")) return; }
+  const len = w.getTotalLength(), color = COLORS[kind] || "#a7c7e7", NS = "http://www.w3.org/2000/svg";
+  const g = document.createElementNS(NS, "g");
+  g.innerHTML = `<circle class="pulse" r="5" fill="${color}"/><circle r="11" fill="${color}" opacity=".16"/>`;
+  const left = (peer ? from : worker) % 2 === 1;
+  const pill = document.createElementNS(NS, "rect"), label = document.createElementNS(NS, "text");
+  label.setAttribute("class", "tag"); label.setAttribute("fill", color); label.setAttribute("dy", "4");
+  label.setAttribute("x", left ? -16 : 16); label.setAttribute("text-anchor", left ? "end" : "start");
+  label.textContent = (text || kind).slice(0, 40) + ((text || "").length > 40 ? "…" : "");
+  g.appendChild(pill); g.appendChild(label); flow.appendChild(g);
+  const bb = label.getBBox();
+  pill.setAttribute("x", bb.x - 8); pill.setAttribute("y", bb.y - 4); pill.setAttribute("width", bb.width + 16); pill.setAttribute("height", bb.height + 8);
+  pill.setAttribute("rx", 9); pill.setAttribute("fill", "#0b0e15"); pill.setAttribute("stroke", color); pill.setAttribute("stroke-opacity", ".45");
+  const t0 = performance.now(), dur = peer ? 3200 : 2600;
+  const step = (now) => {
+    let k = Math.min(1, (now - t0) / dur); k = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+    const pt = w.getPointAtLength((toWorker ? k : 1 - k) * len);
+    g.setAttribute("transform", `translate(${pt.x},${pt.y})`);
+    g.style.opacity = k > .85 ? (1 - k) / .15 : 1;
+    if (k < 1) requestAnimationFrame(step); else { g.remove(); if (peer) w.remove(); }
+  };
+  requestAnimationFrame(step);
+  const chip = court.querySelector(`.q[data-slot="${worker}"] .chip`);
+  chip?.classList.remove("ping"); void chip?.offsetWidth; chip?.classList.add("ping");
+}
+
+/* ── state from the server ── */
+const STATES = {working: "working", done: "done ✓", asking: "has a question", blocked: "blocked", waiting: "waiting for the boss", "needs-you": "⚠ needs your call"};
+function applyState(list) {
+  const had = bossPresent();
+  slots = list;
+  for (const s of list) {
+    if (s.slot === 0) continue;
+    const q = court.querySelector(`.q[data-slot="${s.slot}"]`); if (!q) continue;
+    q.querySelector(".dir").textContent = s.dir;
+    q.querySelector(".task").textContent = s.task || "";
+    const st = s.state || "idle", chip = q.querySelector(".chip");
+    chip.className = "chip " + st; chip.textContent = STATES[st] || "idle";
+    q.classList.toggle("alert", st === "needs-you");
+    q.querySelector(".port").classList.toggle("live", st === "working" || st === "asking" || st === "waiting");
+    const w = wires.get(s.slot);
+    // the wire keeps flowing while the worker is busy (including waiting on a call); it only stops once it's done or idle
+    const busy = st === "working" || st === "asking" || st === "waiting" || st === "needs-you";
+    if (w) { w.classList.toggle("working", busy); w.classList.toggle("back", st === "done"); }
+  }
+  if (!had && bossPresent()) toast("The boss is here. Click the orb to talk to it.");
+  renderOrb();
+}
+
+function connect() {
+  if (locked) return;
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?s=${encodeURIComponent(SESSION)}`);
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.t === "state") applyState(m.slots);
+    else if (m.t === "inbox") { inbox = m.items; autopilot = !!m.autopilot; renderInbox(); renderOrb(); }
+    else if (m.t === "screen") { const v = m.slot === 0 ? bossView() : views.get(m.slot); v?.update(m); if (m.slot === 0) renderOrbStatus(); }
+    else if (m.t === "event") { if (m.kind !== "boss" && m.kind !== "needs-you" && m.kind !== "question-you") pulse(m.from, m.to, m.kind, m.text); }
+    else if (m.t === "people") { online = m.online || []; renderHere(); if (me.owner && panelOpen && tab === "people") loadPeople(); }
+    else if (m.t === "gone") toast("This claude4 team isn't running. Start one with: claude4 --web", 6000);
+  };
+  // A dropped socket may mean this person was just revoked: ask the server before reconnecting.
+  ws.onclose = (e) => {
+    if (e.code === 4001) return gate();
+    setTimeout(async () => { await loadMe(); connect(); }, 1500);
+  };
+}
+
+document.addEventListener("visibilitychange", () => { if (!document.hidden) for (const v of views.values()) if (v.pending.length) v.flush(); });
+addEventListener("resize", () => { for (const v of views.values()) v.fit(); renderOrb(); });
+document.fonts.ready.then(async () => { await loadMe(); renderOrb(); renderInbox(); views.get(1).focus(); connect(); for (const v of views.values()) v.fit(); });
+</script>
+</body>
+</html>

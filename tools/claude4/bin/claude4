@@ -1,0 +1,315 @@
+#!/bin/zsh
+# claude4: Claude Code sessions in the four corners of one screen.
+#
+#   claude4                 Terminal, team mode: top-left is the orchestrator, the other three are workers.
+#                           Give the orchestrator a goal; it hands tasks to the workers.
+#   claude4 --web           Browser view: four workers in the corners and a ◆ button in the middle.
+#                           Click it to call the boss: a fifth Claude, in a circle, that orchestrates
+#                           the four. Dotted lines show tasks going out and reports coming back.
+#                           The boss starts with the panes, so it's ready when the page opens.
+#   claude4 --web --no-boss leave the boss off until you click ◆
+#   claude4 --web --share   let people on the same network open the page (they need an invite link,
+#                           made from the page); prints the LAN address
+#   claude4 --web --tunnel  also give it a public https://….trycloudflare.com address via cloudflared
+#                           (log: ~/.claude4/tunnel.log); claude4 --web -k stops the tunnel
+#   claude4 -o 3            make another quarter the orchestrator (1 TL, 2 TR, 3 BL, 4 BR)
+#   claude4 -2              two halves instead of quarters (left orchestrator, right worker)
+#   claude4 --solo          four independent Claudes, no orchestrator
+#   claude4 -n              four plain shells
+#   Permissions (default: coordinated): routine work runs on its own, the coordinator approves the
+#                           rest, and important actions (push, deploy, delete, send, secrets…) come to you.
+#   claude4 --full          full access: nothing asks
+#   claude4 --safe          every tool call asks you, like a normal Claude
+#   claude4 --name NAME     run another, separately named team alongside (e.g. --web --name design)
+#   claude4 [options] DIR…  one folder per quarter, in reading order (fewer folders reuse the last)
+#   claude4 -k              close the Terminal session (claude4 --web -k closes the browser one)
+#   C4_WEB_PORT=7766        run the browser view's server on another port (default 7744)
+#
+# Running claude4 again reattaches to the open session.
+# In Terminal: click a quarter to type in it, drag a border to resize, scroll with the trackpad.
+# Ctrl-b z makes the current quarter full screen (again to undo). Ctrl-b d detaches;
+# everything keeps running and claude4 brings it back. The team's commands: c4 help.
+
+SESSION=claude4
+mode=team; panes=4; orch=1; web=0; kill=0; access=coordinated; name=; share=0; tunnel=0; boss=1
+WEB_PORT=${C4_WEB_PORT:-7744}
+WEB_DIR=$HOME/.claude4/web
+
+while (( $# )); do
+  case "$1" in
+    -k) kill=1 ;;
+    -n) mode=shell ;;
+    --solo) mode=solo ;;
+    --web) web=1 ;;
+    --share) share=1 ;;
+    --tunnel) tunnel=1 ;;
+    --no-boss) boss=0 ;;
+    --safe) access=safe ;;
+    --full) access=full ;;
+    -2) panes=2 ;;
+    -o) shift; orch=$1 ;;
+    --name) shift; name=$1; [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "--name takes letters, digits, - and _" >&2; exit 1; } ;;
+    -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "Unknown option $1 (claude4 -h)" >&2; exit 1 ;;
+    *) break ;;
+  esac
+  shift
+done
+if (( web )); then SESSION=claude4web; mode=web; panes=4; fi
+[[ -n $name ]] && SESSION=$name
+STATE=$HOME/.claude4/$SESSION
+export C4_SESSION=$SESSION
+
+# ── the browser view's server (shared by every web session on this port) ──
+# web-PORT.env records how the running server was started: its host and public URL.
+SUFFIX=; (( WEB_PORT != 7744 )) && SUFFIX=-$WEB_PORT
+SRV_ENV=$HOME/.claude4/web$SUFFIX.env
+TUN_PID=$HOME/.claude4/tunnel$SUFFIX.pid
+TUN_LOG=$HOME/.claude4/tunnel$SUFFIX.log
+
+srv_up() { curl -s -o /dev/null "http://127.0.0.1:$WEB_PORT/health"; }
+srv_pid() { lsof -nP -t -iTCP:$WEB_PORT -sTCP:LISTEN 2>/dev/null | head -1; }
+srv_shared() { lsof -nP -a -p "$(srv_pid)" -iTCP:$WEB_PORT -sTCP:LISTEN 2>/dev/null | grep -q -E '(\*|0\.0\.0\.0):'"$WEB_PORT"; }
+srv_public() { sed -n 's/^PUBLIC=//p' "$SRV_ENV" 2>/dev/null; }
+tunnel_alive() { [[ -s $TUN_PID ]] && kill -0 "$(<$TUN_PID)" 2>/dev/null; }
+lan_ips() { ifconfig 2>/dev/null | awk '/inet / && $2 !~ /^127\./ {print $2}'; }
+
+srv_start() {  # $1 host, $2 public URL (may be empty)
+  [[ -d "$WEB_DIR/node_modules/ws" ]] || (cd "$WEB_DIR" && npm install --silent >/dev/null 2>&1)
+  C4_WEB_PORT=$WEB_PORT C4_WEB_HOST=$1 C4_PUBLIC_URL=$2 nohup node "$WEB_DIR/server.js" >> "$HOME/.claude4/web.log" 2>&1 &!
+  print -l -- "HOST=$1" "PUBLIC=$2" > "$SRV_ENV"
+  for i in {1..30}; do srv_up && return 0; sleep 0.2; done
+  echo "The web server didn't start; see ~/.claude4/web.log" >&2; return 1
+}
+srv_stop() {
+  local pid=$(srv_pid) i
+  [[ -n $pid ]] || return 0
+  ps -o command= -p "$pid" | grep -q "$WEB_DIR/server.js" || { echo "Port $WEB_PORT is held by something else (pid $pid)." >&2; return 1; }
+  kill "$pid"
+  for i in {1..30}; do [[ -z "$(srv_pid)" ]] && return 0; sleep 0.2; done
+  return 1
+}
+
+tunnel_start() {  # prints the public URL
+  local i url
+  if tunnel_alive; then
+    url=$(grep -o -E 'https://[a-z0-9-]+\.trycloudflare\.com' "$TUN_LOG" 2>/dev/null | tail -1)
+    [[ -n $url ]] && { print -- "$url"; return 0; }
+    kill "$(<$TUN_PID)" 2>/dev/null
+  fi
+  command -v cloudflared >/dev/null || { echo "--tunnel needs cloudflared (brew install cloudflared)" >&2; return 1; }
+  : > "$TUN_LOG"
+  nohup cloudflared tunnel --url "http://127.0.0.1:$WEB_PORT" >> "$TUN_LOG" 2>&1 &!
+  print -- $! > "$TUN_PID"
+  for i in {1..150}; do
+    url=$(grep -o -E 'https://[a-z0-9-]+\.trycloudflare\.com' "$TUN_LOG" | head -1)
+    [[ -n $url ]] && { print -- "$url"; return 0; }
+    tunnel_alive || break
+    sleep 0.2
+  done
+  echo "cloudflared didn't report a trycloudflare.com address; see $TUN_LOG" >&2
+  tunnel_stop; return 1
+}
+tunnel_stop() {
+  tunnel_alive && kill "$(<$TUN_PID)" 2>/dev/null
+  rm -f "$TUN_PID"
+}
+
+if (( kill )); then
+  tmux kill-session -t "$SESSION" 2>/dev/null && echo "Closed $SESSION." || echo "No $SESSION session open."
+  if (( web )) && tunnel_alive; then
+    tunnel_stop; echo "Stopped the public tunnel."
+    # Invite links made from now on shouldn't point at the dead tunnel address.
+    if [[ -n "$(srv_public)" ]] && srv_up; then
+      h=127.0.0.1; srv_shared && h=0.0.0.0
+      srv_stop && srv_start $h ""
+    fi
+  fi
+  exit 0
+fi
+[[ "$orch" == <-> ]] && (( orch >= 1 && orch <= panes )) || { echo "-o must be 1-$panes" >&2; exit 1; }
+(( ! web && (share || tunnel) )) && { echo "--share and --tunnel go with --web" >&2; exit 1; }
+
+open_web() {
+  local host=127.0.0.1 public= ip
+  if srv_up; then
+    srv_shared && host=0.0.0.0
+    public=$(srv_public)
+  fi
+  local want_host=$host want_public=$public
+  (( share )) && want_host=0.0.0.0
+  if (( tunnel )); then want_public=$(tunnel_start) || return 1
+  elif ! tunnel_alive; then want_public=; fi
+  if ! srv_up; then
+    srv_start $want_host "$want_public" || return 1
+  elif [[ $want_host != $host || "$want_public" != "$public" ]]; then
+    # Restart only the node server; the tmux sessions keep running and the pages reconnect.
+    echo "Restarting the web server with the new sharing settings (the panes keep running)…"
+    srv_stop && srv_start $want_host "$want_public" || return 1
+  fi
+  open "http://127.0.0.1:$WEB_PORT/?s=$SESSION"
+  echo "claude4 is open in your browser. Close everything with: claude4 --web${name:+ --name $name} -k"
+  if [[ $want_host == 0.0.0.0 ]]; then
+    for ip in $(lan_ips); do echo "  On your network:  http://$ip:$WEB_PORT/?s=$SESSION"; done
+  fi
+  [[ -n $want_public ]] && echo "  Public address:   $want_public/?s=$SESSION"
+  [[ $want_host == 0.0.0.0 || -n $want_public ]] && echo "  Other people need an invite link: add them from the page."
+  return 0
+}
+summon_boss() { (( boss )) && c4 summon-boss >/dev/null 2>&1; }
+
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  (( web )) && { summon_boss; open_web; exit $?; }
+  (( $# )) && echo "claude4 is already open; reattaching (run claude4 -k first to start fresh)." >&2
+  [[ -n "$TMUX" ]] && exec tmux switch-client -t "$SESSION"
+  exec tmux attach -t "$SESSION"
+fi
+
+dirs=("$@")
+(( ${#dirs} == 0 )) && dirs=("$PWD")
+for i in {1..$panes}; do
+  d="${dirs[$i]:-${dirs[-1]}}"
+  d="${d/#\~/$HOME}"
+  [[ -d "$d" ]] || { echo "Not a folder: $d" >&2; exit 1; }
+  dirs[$i]="${d:A}"
+done
+
+rm -rf "$STATE"; mkdir -p "$STATE"
+# How tool calls get approved (see ~/.claude4/hooks/permission.mjs). c4 summon-boss reads this too.
+case $access in
+  # full and safe skip the approval hook but still get the @state hooks (settings.json has both)
+  full) perm="--dangerously-skip-permissions --settings $HOME/.claude4/hooks/state-hooks.json" ;;
+  safe) perm="--permission-mode manual --settings $HOME/.claude4/hooks/state-hooks.json" ;;
+  *) perm="--permission-mode manual --settings $HOME/.claude4/hooks/settings.json" ;;
+esac
+print -r -- "$perm" > "$STATE/perm-flags"
+# In the browser view, the owner answers on the boss circle instead of in each pane.
+(( web )) && : > "$STATE/approvals-ui"
+: > "$STATE/inbox"; : > "$STATE/events.jsonl"
+print -- "# claude4 board, $(date '+%a %b %d %H:%M')" > "$STATE/board.md"
+
+# ── layout ────────────────────────────────────────────────────────────────
+# The browser scrolls each pane, so web panes are tall: Claude Code keeps a long stretch of the
+# conversation on screen, and the page trims the blank rows below it.
+if (( web )); then cols=200; rows=482
+else cols=$(tput cols 2>/dev/null || echo 200); rows=$(tput lines 2>/dev/null || echo 50); fi
+tmux new-session -d -s "$SESSION" -c "${dirs[1]}" -x "$cols" -y "$rows" -e C4_SESSION=$SESSION
+if (( panes == 4 )); then
+  # A 2x2 grid. After "tiled", panes read left to right, top to bottom: 0 1 / 2 3.
+  tmux split-window -h -l 50% -t "$SESSION:0.0" -c "${dirs[3]}" -e C4_SESSION=$SESSION
+  tmux split-window -v -l 50% -t "$SESSION:0.0" -c "${dirs[2]}" -e C4_SESSION=$SESSION
+  tmux split-window -v -l 50% -t "$SESSION:0.2" -c "${dirs[4]}" -e C4_SESSION=$SESSION
+  layout=tiled
+else
+  tmux split-window -h -l 50% -t "$SESSION:0.0" -c "${dirs[2]}" -e C4_SESSION=$SESSION
+  layout=even-horizontal
+fi
+tmux select-layout -t "$SESSION" $layout
+if (( web )); then
+  # The browser scales each terminal to fit, so the panes keep one fixed size.
+  tmux set -w -t "$SESSION:0" window-size manual
+  tmux resize-window -t "$SESSION:0" -x $cols -y $rows
+  tmux select-layout -t "$SESSION" $layout
+else
+  # Re-square the grid whenever the window is resized or reattached.
+  tmux set-hook -t "$SESSION" client-resized "select-layout -t $SESSION:0 $layout"
+  tmux set-hook -t "$SESSION" client-attached "select-layout -t $SESSION:0 $layout"
+fi
+: > "$STATE/panes"
+for q in {1..$panes}; do
+  print -- "$q $(tmux display -p -t "$SESSION:0.$(( q - 1 ))" '#{pane_id}')" >> "$STATE/panes"
+done
+
+# ── look: dark, quiet, one pastel blue accent, pastel status colours ──────
+T() { tmux set -t "$SESSION" "$@"; }
+tmux set -s escape-time 10              # Esc reaches Claude right away
+tmux set -s extended-keys on            # Shift+Enter for new lines in Claude
+tmux set -s focus-events on             # Claude Code asks for this inside tmux
+tmux set -s default-terminal screen-256color
+T mouse on
+T history-limit 50000
+T status-position bottom
+T status-style "bg=#141821,fg=#7f879a"
+T status-left-length 30
+T status-left "#[bg=#a7c7e7,fg=#0a1520,bold]  claude4 #[bg=#141821,fg=#a7c7e7] "
+T status-right-length 90
+T status-right "#[fg=#5c6477]click a quarter to type · ^b z zoom · ^b d detach  #[fg=#c0c6d4]%H:%M "
+T window-status-format ""
+T window-status-current-format ""
+T pane-border-lines heavy
+T pane-border-style "fg=#2a3040"
+T pane-active-border-style "fg=#a7c7e7"
+T pane-border-status top
+# Each quarter's header: its role, what it's doing and its state.
+T pane-border-format "#{?pane_active,#[fg=#a7c7e7 bold],#[fg=#8b93a7]} #{?#{==:#{@role},orchestrator},◆ ORCHESTRATOR,#{?#{@role},● #{@label},#{@label}}} #[fg=#5c6477 nobold]· #{b:pane_current_path} #{?#{@task},#[fg=#c0c6d4]· #{@task} ,}#{?#{==:#{@state},working},#[fg=#ecdc98]· working ,#{?#{==:#{@state},done},#[fg=#9fdcb4]· done ✓ ,#{?#{==:#{@state},blocked},#[fg=#f2a7a7]· blocked ,#{?#{==:#{@state},asking},#[fg=#c4b5f4]· has a question ,#{?#{==:#{@state},waiting},#[fg=#c4b5f4]· waiting for approval ,#{?#{==:#{@state},needs-you},#[fg=#f2a7a7 bold]· ⚠ NEEDS YOUR APPROVAL ,}}}}}}"
+T message-style "bg=#1d2230,fg=#a7c7e7"
+T mode-style "bg=#2a3140,fg=#e6e9ef"
+T display-panes-active-colour "#a7c7e7"
+T display-panes-colour "#5c6477"
+(( web )) && T pane-border-status off   # the browser draws its own headers
+
+corner() {
+  if (( panes == 2 )); then (( $1 == 1 )) && print left || print right
+  else case $1 in 1) print "top-left";; 2) print "top-right";; 3) print "bottom-left";; 4) print "bottom-right";; esac; fi
+}
+
+# ── roles and launch ──────────────────────────────────────────────────────
+typeset -A launch
+for q in {1..$panes}; do
+  p="$SESSION:0.$(( q - 1 ))"
+  if [[ $mode == team ]] && (( q == orch )); then
+    tmux set -p -t "$p" @role orchestrator
+  elif [[ $mode == (team|web) ]]; then
+    tmux set -p -t "$p" @role worker
+    tmux set -p -t "$p" @label "WORKER $q"
+  else
+    tmux set -p -t "$p" @label "$(corner $q | tr a-z A-Z)"
+  fi
+done
+for q in {1..$panes}; do
+  case $mode in
+    team|web)
+      f="$STATE/prompt-q$q.md"
+      if [[ $mode == team ]] && (( q == orch )); then c4 prompt orchestrator $q > "$f"; cname="c4 orchestrator"
+      else c4 prompt worker $q > "$f"; cname="c4 worker $q"; fi
+      launch[$q]=" clear; claude $perm --append-system-prompt-file ${(q)f} --allowedTools 'Bash(c4:*)' -n ${(q)cname}" ;;
+    solo) launch[$q]=" clear; claude $perm" ;;
+    shell) ;;
+  esac
+done
+tmux select-pane -t "$SESSION:0.$(( orch - 1 ))"
+
+# Start the first Claude alone. In a folder Claude hasn't opened before it asks
+# "trust this folder?" (and maybe about project MCP servers); once that's
+# answered in one quarter it's remembered, so the others start after it
+# instead of all four asking at once.
+if (( ${#launch} )); then
+  first=$orch; [[ $mode == (solo|web) ]] && first=1
+  tmux send-keys -t "$SESSION:0.$(( first - 1 ))" "${launch[$first]}" Enter
+  (
+    fp="$SESSION:0.$(( first - 1 ))"; asked=0
+    for i in {1..900}; do
+      tmux has-session -t "$SESSION" 2>/dev/null || exit 0
+      scr=$(tmux capture-pane -p -t "$fp")
+      if print -r -- "$scr" | grep -q -E 'trust this folder|Enter to confirm'; then
+        (( asked )) || tmux display -d 10000 -t "$SESSION" "Answer the prompt in the $(corner $first) quarter. The others start right after."
+        asked=1
+      elif print -r -- "$scr" | grep -q -E '\? for shortcuts|permissions on|accept edits|auto mode|plan mode|Try "'; then
+        break
+      fi
+      sleep 1
+    done
+    (( asked )) && sleep 2
+    tmux has-session -t "$SESSION" 2>/dev/null || exit 0   # closed while we waited
+    for q in ${(k)launch}; do
+      (( q == first )) && continue
+      tmux send-keys -t "$SESSION:0.$(( q - 1 ))" "${launch[$q]}" Enter
+    done
+    # The boss opens in the same folder as quarter 1, which is trusted by now.
+    [[ $mode == web ]] && summon_boss
+  ) >/dev/null 2>&1 &!
+fi
+
+(( web )) && { open_web; exit $?; }
+[[ -n "$TMUX" ]] && exec tmux switch-client -t "$SESSION"
+exec tmux attach -t "$SESSION"

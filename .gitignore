@@ -4,6 +4,8 @@ logs/
 dist/
 .env
 .env.*
+# templates with placeholder values only; they must stay tracked
+!.env.example
 *.sqlite
 *.sqlite-*
 .vercel
