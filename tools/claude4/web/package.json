@@ -1,0 +1,7 @@
+{
+  "name": "claude4-web",
+  "private": true,
+  "type": "module",
+  "description": "Browser view for claude4: four Claude workers in the corners, the boss in a circle in the middle.",
+  "dependencies": { "ws": "^8.18.0" }
+}

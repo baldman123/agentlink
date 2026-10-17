@@ -1,0 +1,363 @@
+#!/bin/zsh
+# c4: how the Claudes in a claude4 team talk to each other.
+# Slots: 1 top-left, 2 top-right, 3 bottom-left, 4 bottom-right (2-pane mode: 1 left, 2 right),
+# 0 the boss (the circle in the middle of the browser view, when it's been called).
+#
+# Orchestrator (the boss, or whichever quarter was made orchestrator):
+#   c4 assign N "task"    give worker N a task (self-contained; workers don't see your chat)
+#   c4 tell N "message"   follow-up, correction or answer for worker N
+#   c4 status             every slot: role, state, task, last lines on screen
+#   c4 peek N [lines]     read slot N's screen (default 60 lines)
+#   c4 wait [seconds]     block until a worker reports (default 300s)
+#   c4 approve ID         let a worker's waiting tool call run
+#   c4 deny ID "why"      refuse it; the worker sees your reason
+#   c4 escalate ID "note"  hand it to the owner (YOUR CALLS on the boss circle). The note is what they read
+#                         first, 2-3 plain-English sentences a non-programmer gets: what happens, to what,
+#                         why the worker needs it, what yes/no lead to, and your recommendation.
+#   c4 ask-bryant "question" ["details"]  ask the owner something only they can answer; their reply comes back
+#                         to you. Write the question in plain English; details cover what happens, why it's
+#                         needed, what each answer leads to, and your recommendation.
+#   c4 requests           permission requests and questions still waiting
+# Workers:
+#   c4 done "summary"     report the task finished (wakes the orchestrator)
+#   c4 ask "question"     ask the orchestrator something; keep working on what doesn't depend on it
+#   c4 blocked "reason"   report you can't continue
+# Anyone (workers and the orchestrator):
+#   c4 msg N "message"    message one teammate directly (N = slot, 0 = the boss)
+#   c4 all "message"      message every other teammate
+#   c4 status / c4 peek N see what the others are doing
+#   c4 board              the team log
+# The owner (from their own shell, or the boss circle's buttons; Claudes can't run these):
+#   c4 decide ID approve|deny ["why"]   answer a request waiting for you
+#   c4 answer ID "text"                 answer a question waiting for you
+#   c4 autopilot [on|off]               on: the boss decides everything that would come to the owner (logged
+#                                       on the board); merging or pushing into main stays blocked
+# Setup (used by claude4 and the browser view):
+#   c4 summon-boss        start the boss Claude in its own window and make it the orchestrator
+#   c4 prompt orchestrator|worker SLOT   print a role's instructions
+
+SESSION=${C4_SESSION:-claude4}
+STATE=$HOME/.claude4/$SESSION
+REG=$STATE/panes          # "slot pane_id" per line
+BOARD=$STATE/board.md
+INBOX=$STATE/inbox
+EVENTS=$STATE/events.jsonl
+mkdir -p "$STATE"
+touch "$BOARD" "$INBOX" "$EVENTS" "$REG"
+
+die() { print -u2 -- "c4: $*"; exit 1; }
+
+slots() { awk '{print $1}' "$REG" | sort -n; }
+pane_of() { awk -v s="$1" '$1==s {print $2}' "$REG"; }
+popt() { tmux show -pqv -t "$(pane_of $1)" "$2"; }
+setp() { tmux set -p -t "$(pane_of $1)" "$2" "$3"; }
+check_q() { [[ -n "$(pane_of "$1")" ]] || die "no slot '$1' (have: $(slots | tr '\n' ' '))"; }
+my_q() {
+  [[ -n "$TMUX_PANE" ]] || die "run this from inside a claude4 pane"
+  awk -v p="$TMUX_PANE" '$2==p {print $1}' "$REG"
+}
+orch_q() { local q; for q in $(slots); do [[ "$(popt $q @role)" == orchestrator ]] && { print -- $q; return; }; done; }
+name_of() { [[ "$1" == 0 ]] && print "the boss" || print "quarter $1"; }
+log() { print -- "- $(date '+%H:%M') $*" >> "$BOARD"; }
+short() { local s="${1//$'\n'/ }"; (( ${#s} > 48 )) && s="${s[1,46]}…"; print -- "$s"; }
+# One line per hand-off, for the browser view's flow animation.
+event() {
+  local text=${4//\\/\\\\}; text=${text//\"/\\\"}; text=${text//$'\n'/ }; text=${text//$'\t'/ }
+  print -r -- "{\"t\":$(date +%s),\"kind\":\"$1\",\"from\":$2,\"to\":$3,\"text\":\"${text[1,160]}\"}" >> "$EVENTS"
+}
+
+# Text typed but not yet sent in a pane's input box: the lines between the last two divider lines,
+# without the ❯ prompt and the hints an empty box shows ('Try "…"', queued messages). Empty when nobody is mid-message.
+draft() {
+  tmux capture-pane -p -t "$1" | awk 'index($0, "──────") { n++; d[n]=NR } { l[NR]=$0 } END {
+    if (n < 2) exit
+    for (i = d[n-1]+1; i < d[n]; i++) { s = l[i]; sub(/^[[:space:]]*❯?[[:space:]]*/, "", s); if (i == d[n-1]+1) sub(/^Try ".*"$/, "", s); sub(/^Press up to edit queued messages$/, "", s); if (s != "") print s }
+  }'
+}
+
+# Paste text into a pane's Claude as one message and send it. Bracketed paste
+# keeps multi-line text together; Claude queues it if it's busy.
+send() {
+  local target=$(pane_of $1) text=$2 i
+  # If the pane is showing a yes/no prompt, the Enter after the paste would answer it. Wait.
+  for i in {1..600}; do
+    # Only the bottom of the screen counts: a tall pane still shows old, answered prompts higher up.
+    tmux capture-pane -p -t "$target" | grep -v '^[[:space:]]*$' | tail -n 12 | grep -q -E 'Do you want to proceed\?|Enter to confirm|Esc to cancel' || break
+    (( i == 1 )) && print -u2 -- "c4: $(name_of $1) is answering a prompt; the message goes in when it's done."
+    sleep 1
+  done
+  # If someone is typing in the pane's input box, the paste would land inside their draft and the Enter
+  # would send both. Wait until the box is empty (sent or cleared); after 5 minutes deliver anyway.
+  for i in {1..300}; do
+    [[ -z "$(draft $target)" ]] && break
+    (( i == 1 )) && print -u2 -- "c4: someone is typing in $(name_of $1)'s input box; the message goes in once it's sent or cleared."
+    sleep 1
+  done
+  tmux set-buffer -b c4msg -- "$text"
+  tmux paste-buffer -p -d -b c4msg -t "$target"
+  sleep 0.4
+  tmux send-keys -t "$target" Enter
+}
+
+# A pane's recent text without Claude's frame (divider lines, prompt box, mode hints).
+screen() {
+  tmux capture-pane -p -J -S -$2 -t "$(pane_of $1)" \
+    | grep -v -E '^[[:space:]]*$|^[[:space:]─━│❯>·]*$|─{6,}|shift\+tab|accept edits|bypass permissions|\? for shortcuts'
+}
+
+corner() {
+  local n=$(slots | grep -cv '^0$')
+  case "$1" in
+    0) print "the circle in the middle" ;;
+    *) if (( n == 2 )); then (( $1 == 1 )) && print left || print right
+       else case $1 in 1) print top-left;; 2) print top-right;; 3) print bottom-left;; 4) print bottom-right;; esac; fi ;;
+  esac
+}
+
+prompt_orchestrator() {
+  local me=$1 workers=() q
+  for q in $(slots); do [[ $q != $me ]] && workers+=("$(name_of $q) ($(corner $q))"); done
+  cat <<EOF
+You are the ORCHESTRATOR of a claude4 team: Claude Code sessions running side by side, all visible to the user at once. You are $(name_of $me) ($(corner $me)). Your workers are ${(j:, :)workers}. Each worker is a separate Claude Code session in its own pane; they can't see this conversation. Some may already be busy with something the user asked them directly, so run c4 status before you hand out work.
+
+When the user gives you a goal:
+1. Break it into tasks that can run at the same time without editing the same files. Use as many workers as the goal needs; leave the rest idle.
+2. Assign each with: c4 assign <slot> "<task>". Make every task self-contained: the goal, the exact folders and files, constraints, and what "done" means.
+3. Tell the user in two or three lines who is doing what, then end your turn. Don't sit polling.
+4. Worker messages arrive in your input as "[c4 report from quarter N]", "[c4 question from quarter N]" or "[c4 BLOCKED from quarter N]". Answer questions with c4 tell N "...". Check work with c4 peek N or c4 status before you accept it, and send fixes with c4 tell.
+5. When every task is in, check the combined result, then give the user a short summary: what changed, where, and what still needs their decision.
+
+Workers can also talk to each other directly with c4 msg and c4 all (for example to agree on a shared interface), so you don't have to relay everything. Their messages are logged in c4 board. If two workers need each other's output, say so in their tasks and let them coordinate.
+
+Answer as much as you can yourself. When a worker asks a question (c4 ask), decide it from the goal, the code and sensible defaults, and reply with c4 tell; most questions should never reach the owner. Only pass something on when it truly needs them: their preferences or taste on something visible, money, accounts or credentials, or effects outside this machine. Then run c4 ask-bryant "<the question in plain English>" "<details>". Write the details for a non-programmer and cover: what happens, why the worker needs it, what each answer leads to (yes means…, no means…, or each option's effect), and your recommendation with a one-line reason. It shows up on the boss circle, and their answer arrives in your input as "[c4 answer from the owner]". Don't wait for it: keep the team moving on everything that doesn't depend on the answer, and tell the asking worker to do the same. Don't ask the owner questions in your own chat; use c4 ask-bryant so they all land in one place.
+
+You are also the team's permission gate. Workers' routine tool calls run on their own (reading, searching, editing inside their project, tests and builds). Anything else arrives in your input as "[c4 permission request #ID from quarter N]" with the exact command or file, and the worker waits until you answer:
+- c4 approve ID when it fits the worker's task and its effects stay in the project (installing a dependency the task needs, running a project script, writing a file the task names).
+- c4 deny ID "<why and what to do instead>" when it's outside the task, risky, or there's a safer way.
+- c4 escalate ID "<one plain-English sentence for the owner>" only when it has effects you can't undo or that reach outside this machine. When you're merely unsure, look at the worker's task and the code, then decide. Escalated requests land in the owner's inbox on the boss circle, and your note is the first thing they read, so write it for a non-programmer in two or three short sentences (under 300 characters), never the raw command: what will happen and to what, why the worker needs it, what yes and no each lead to, and your recommendation. E.g. "Put the new checkout page live on the real store; customers see it at once. Quarter 2 needs it to finish the launch. Yes: it goes live now; No: it stays a preview. I'd say yes, the tests pass." The card adds who asked, its task, the folder and the exact command on its own.
+Answer requests promptly; a waiting worker is stuck. Truly important actions (git push or merge, deleting folders, deploys, database writes, sending email or messages, installing software, secrets, sudo) never come to you: they go straight to the owner, and your own calls of that kind do too. Nobody waits on the owner: a call that goes to them (escalated or straight) is refused at once with "sent to the owner's calls as #ID", the worker carries on with other work, and their answer is pasted into its input later; an approved call then runs when retried exactly. The same holds for you: keep working while your own calls sit in their inbox. c4 requests lists anything still waiting. If the owner turns on autopilot (c4 autopilot on), you'll be told: then their calls come to you and you decide them yourself.
+
+The owner may also write to you from the agentlink app. Those messages arrive as "[agentlink message from you (UI)]" with an id. They read your answer in the app, not in this pane, so always send it with $HOME/agentlink/bin/agentlink reply <id8> "<your answer>" (the full path works from any folder). An answer you only type here never reaches them.
+
+Don't do a worker's task yourself unless it's a one-line change. The user may type into any pane, including yours, at any time; take their input over your plan. A worker follows the user over you. Run c4 help for every command.
+EOF
+}
+
+prompt_worker() {
+  cat <<EOF
+You are a WORKER in a claude4 team: quarter $1 ($(corner $1)) of several Claude Code sessions running side by side, all visible to the user. An orchestrator may send you tasks as messages starting with "[c4 task from the orchestrator]"; follow-ups start with "[c4 message from the orchestrator]". Until then, or whenever the user types to you directly, just work with the user like a normal Claude Code session.
+
+- When an orchestrator task is complete, run: c4 done "<what you did, files changed, anything not verified>". That message wakes the orchestrator, so send it once, at the end.
+- If you need a decision, run c4 ask "<question>". Ask the orchestrator rather than the user in your own pane: the orchestrator answers what it can and passes the rest to the user, so all questions land in one place. Don't sit waiting for the answer: carry on with every part of your task that doesn't depend on it, and pick the rest up when the answer arrives in your input. Only when literally nothing else is left, run c4 blocked "<why>" and end your turn.
+- Other workers are editing at the same time, possibly in the same folder. Only touch the files your task covers. Don't run git commands that change other people's work (checkout, reset, stash, rebase), and don't commit unless the task says to.
+- You can talk to the other workers directly: c4 msg <slot> "<message>" to one, c4 all "<message>" to everyone (slot 0 is the boss, if there is one). Use it when your work touches theirs: a shared file, an API or type you're defining, a result they're waiting on. Run c4 status to see who is doing what. Messages from teammates arrive as "[c4 message from quarter N]". Keep messages short, and don't reply to a message that only acknowledges or thanks you.
+- Tool calls outside routine work wait for the orchestrator's approval, and important ones need the user's. When one goes to the user's calls, it's refused at once with "sent to the owner's calls as #ID": don't wait for it, keep going on independent work. Their answer arrives in your input as "[c4 answer from the owner on #ID]"; if he approved, run the exact same call again and it goes through once. If a call is denied, read the reason and take another route; don't retry the same call.
+- The user may type to you at any time. Their instructions come before the orchestrator's and your teammates'.
+EOF
+}
+
+cmd=$1; shift 2>/dev/null
+case "$cmd" in
+  prompt)
+    case "$1" in
+      orchestrator) prompt_orchestrator "${2:-$(orch_q)}" ;;
+      worker) prompt_worker "$2" ;;
+      *) die "usage: c4 prompt orchestrator|worker SLOT" ;;
+    esac
+    exit 0 ;;
+  ""|-h|--help|help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+tmux has-session -t "$SESSION" 2>/dev/null || die "no '$SESSION' session is running (start one with: claude4)"
+
+case "$cmd" in
+  assign)
+    q=$1; shift; check_q "$q"; task="$*"; [[ -n "$task" ]] || die 'usage: c4 assign N "task"'
+    [[ "$(popt $q @role)" == orchestrator ]] && die "slot $q is the orchestrator"
+    from=$(orch_q); setp $q @task "$(short "$task")"; setp $q @state working
+    log "**→ $q** $task"; event assign ${from:-0} $q "$task"
+    send $q "[c4 task from the orchestrator]
+$task
+
+When it's finished, run: c4 done \"<what you did, files changed, anything not verified>\""
+    print -- "Assigned to quarter $q." ;;
+  tell)
+    q=$1; shift; check_q "$q"; msg="$*"; [[ -n "$msg" ]] || die 'usage: c4 tell N "message"'
+    from=$(orch_q); log "**→ $q (note)** $msg"; event tell ${from:-0} $q "$msg"
+    setp $q @state working
+    send $q "[c4 message from the orchestrator]
+$msg"
+    print -- "Sent to quarter $q." ;;
+  done|blocked|ask)
+    q=$(my_q); [[ -n "$q" ]] || die "this pane isn't part of the team"
+    msg="$*"; [[ -n "$msg" ]] || die "usage: c4 $cmd \"message\""
+    o=$(orch_q); [[ -n "$o" ]] || die "there's no orchestrator yet; tell the user directly instead"
+    case $cmd in
+      done) state=done; label="report" ;;
+      blocked) state=blocked; label="BLOCKED" ;;
+      ask) state=asking; label="question" ;;
+    esac
+    setp $q @state $state
+    log "**← $q ($label)** $msg"; event $cmd $q $o "$msg"
+    print -r -- "$(date +%s)	$q	$label	${msg//$'\n'/ }" >> "$INBOX"
+    send $o "[c4 $label from quarter $q]
+$msg"
+    print -- "Sent to the orchestrator ($(name_of $o))."
+    if [[ $cmd == ask ]]; then print -- "Its answer arrives in your input. Don't wait for it: carry on with everything that doesn't depend on it."; fi ;;
+  msg|all)
+    me=$(my_q); [[ -n "$me" ]] || die "this pane isn't part of the team"
+    if [[ $cmd == msg ]]; then q=$1; shift; check_q "$q"; [[ $q == $me ]] && die "that's you"; targets=($q)
+    else targets=(${(f)"$(slots | grep -vx "$me")"}); fi
+    text="$*"; [[ -n "$text" ]] || die 'usage: c4 msg N "message" or c4 all "message"'
+    # Guard against two Claudes stuck replying to each other.
+    recent=$(awk -v now=$(date +%s) -v me=$me 'index($0,"\"kind\":\"msg\"") && index($0,"\"from\":" me ",") { if (match($0,/"t":[0-9]+/)) { t=substr($0,RSTART+4,RLENGTH-4); if (now-t < 600) n++ } } END {print n+0}' "$EVENTS")
+    (( recent >= 25 )) && die "you've sent $recent messages in 10 minutes; stop and check with the user or the orchestrator"
+    for q in $targets; do
+      log "**$me → $q (msg)** $text"; event msg $me $q "$text"
+      send $q "[c4 message from $(name_of $me)]
+$text"
+    done
+    print -- "Sent to ${(j:, :)${targets/#/slot }}." ;;
+  approve|deny|escalate)
+    id=$1; shift; [[ -n "$id" ]] || die "usage: c4 $cmd ID"
+    req=$STATE/requests/$id.json
+    [[ -e $req ]] || die "no request #$id (c4 requests lists the open ones)"
+    [[ -e $STATE/requests/$id.decision || -e $STATE/requests/$id.bryant ]] && die "request #$id was already answered"
+    [[ "$(jq -r '.lane // "coordinator"' "$req")" == user ]] && die "request #$id is the owner's to decide; it's already in their inbox"
+    me=$(my_q); o=$(orch_q)
+    [[ -n "$me" && "$me" == "$o" ]] || [[ -z "$TMUX_PANE" ]] || die "only the orchestrator answers permission requests"
+    if [[ $cmd == escalate ]]; then
+      [[ -e $STATE/autopilot ]] && die "autopilot is on: the owner handed these calls to you. Decide it: c4 approve $id or c4 deny $id \"why\""
+      [[ -n "$*" ]] || die "usage: c4 escalate $id \"<2-3 plain-English sentences for the owner: what happens, why the worker needs it, what yes/no lead to, your recommendation>\""
+    fi
+    q=$(jq -r .slot "$req"); what=$(jq -r '.summary // .what' "$req")
+    [[ "$(jq -r '.autopilot // false' "$req")" == true ]] && what="$what (autopilot)"
+    print -r -- "$cmd"$'\n'"$*" > "$STATE/requests/$id.decision"
+    case $cmd in
+      approve) log "**✓ #$id approved** for $(name_of $q): $what"; event approve ${o:-0} $q "approved: $what" ;;
+      deny) log "**✗ #$id denied** for $(name_of $q): $what${*:+ ($*)}"; event deny ${o:-0} $q "denied: ${*:-$what}" ;;
+      escalate) log "**↑ #$id escalated to the owner**: $* ($what)"; event escalate ${o:-0} $q "to the owner: $*" ;;
+    esac
+    print -- "Request #$id: $cmd." ;;
+  requests)
+    found=0
+    for req in $STATE/requests/*.json(N); do
+      id=${req:t:r}; [[ -e $STATE/requests/$id.bryant ]] && continue
+      if [[ "$(jq -r '.needsBryant // false' $req)" == true ]]; then who="waiting for the owner"
+      elif [[ -e $STATE/requests/$id.decision ]]; then continue
+      else who="waiting for you"; fi
+      found=1; print -- "#$id  $(name_of $(jq -r .slot $req))  $(jq -r '.summary // .what' $req)  ($who)"
+    done
+    for qf in $STATE/questions/*.json(N); do
+      id=${qf:t:r}; [[ -e $STATE/questions/$id.answer ]] && continue
+      found=1; print -- "#$id  question for the owner from $(name_of $(jq -r .from $qf)): $(jq -r '.summary // .text' $qf)"
+    done
+    (( found )) || print -- "No requests waiting." ;;
+  ask-bryant)
+    me=$(my_q); [[ -n "$me" ]] || die "this pane isn't part of the team"
+    summary=$1 detail=${2:-}
+    [[ -n "$summary" ]] || die 'usage: c4 ask-bryant "plain-English question" ["details: what happens, why it is needed, what each answer leads to, your recommendation"]'
+    (( $# > 2 )) && { summary="$*"; detail=""; }   # unquoted words: treat them all as the question
+    text=$summary${detail:+$'\n\n'$detail}
+    if [[ -e $STATE/autopilot ]]; then
+      o=$(orch_q)
+      log "**🤖 autopilot: $(name_of $me)'s question for the owner went to $(name_of ${o:-$me})** $summary${detail:+ ($detail)}"
+      event question $me ${o:-$me} "$summary"
+      if [[ -n "$o" && "$o" != "$me" ]]; then
+        send $o "[c4 question from quarter $me (autopilot: this was for the owner, so you decide)]
+$text"
+        print -- "Autopilot is on, so this went to the orchestrator instead of the owner; its answer will arrive in your input."
+      else
+        print -- "Autopilot is on: the owner handed their calls to you, so decide this yourself and carry on. It's logged on the board for them to review."
+      fi
+      exit 0
+    fi
+    mkdir -p "$STATE/questions"; id="q${me}$(date +%s | tail -c 5)"
+    jq -nc --arg id "$id" --argjson from "$me" --arg text "$text" --arg summary "$summary" --arg detail "$detail" --argjson t "$(date +%s)000" \
+      '{id:$id,from:$from,summary:$summary,detail:$detail,text:$text,t:$t}' > "$STATE/questions/$id.json"
+    log "**? $(name_of $me) asks the owner** #$id $summary${detail:+ ($detail)}"; event question-you $me $me "$summary"
+    osascript -e "display notification $(jq -n --arg t "${summary[1,180]}" '$t') with title \"claude4: a question for you\" subtitle \"Answer it on the boss circle\" sound name \"Glass\"" 2>/dev/null
+    print -- "Asked the owner (#$id). Their answer will arrive in your input as \"[c4 answer from the owner]\". Don't wait for it: carry on with everything that doesn't depend on the answer." ;;
+  autopilot)
+    if [[ -z "$1" || "$1" == status ]]; then [[ -e $STATE/autopilot ]] && print -- "Autopilot is on." || print -- "Autopilot is off."; exit 0; fi
+    [[ "$1" == (on|off) ]] || die "usage: c4 autopilot [on|off]"
+    # The owner only, like decide/answer.
+    [[ -n "$TMUX_PANE" ]] && grep -q " $TMUX_PANE\$" "$REG" && die "only the owner switches autopilot (from the boss circle or their own shell)"
+    o=$(orch_q)
+    if [[ "$1" == on ]]; then
+      [[ -e $STATE/autopilot ]] && { print -- "Autopilot is already on."; exit 0; }
+      print -r -- "$(date +%s)" > "$STATE/autopilot"
+      log "**🤖 autopilot ON** (the owner): the boss decides everything that would come to the owner. Merging or pushing into main stays blocked."
+      event autopilot 0 ${o:-0} "autopilot on"
+      [[ -n "$o" ]] && send $o "[c4 message from the owner: autopilot is ON]
+The owner handed you every call that would normally go to them: permission requests marked AUTOPILOT, and workers' questions for them. Decide them yourself with c4 approve / deny / tell; c4 escalate and c4 ask-bryant won't reach them. Your own important calls run without asking. Be careful: everything is logged on the board for them to review. One rule never changes: nothing merges into main or pushes to main (those are refused automatically)."
+      print -- "Autopilot is on."
+    else
+      [[ -e $STATE/autopilot ]] || { print -- "Autopilot is already off."; exit 0; }
+      rm -f "$STATE/autopilot"
+      log "**🤖 autopilot OFF** (the owner): important calls go to the owner again."
+      event autopilot 0 ${o:-0} "autopilot off"
+      [[ -n "$o" ]] && send $o "[c4 message from the owner: autopilot is OFF]
+Important calls go to the owner again; use c4 escalate and c4 ask-bryant as before."
+      print -- "Autopilot is off."
+    fi ;;
+  decide|answer)
+    # The owner only: refuse from inside any team pane.
+    [[ -n "$TMUX_PANE" ]] && grep -q " $TMUX_PANE\$" "$REG" && die "only the owner answers these (from the boss circle or their own shell)"
+    id=$1; shift; [[ -n "$id" ]] || die "usage: c4 $cmd ID ..."
+    if [[ $cmd == decide ]]; then
+      req=$STATE/requests/$id.json; [[ -e $req ]] || die "no request #$id"
+      [[ -e $STATE/requests/$id.bryant ]] && die "request #$id was already answered"
+      verdict=$1; shift; [[ $verdict == (approve|deny) ]] || die "usage: c4 decide ID approve|deny [\"why\"]"
+      print -r -- "$verdict"$'\n'"$*" > "$STATE/requests/$id.bryant"
+      q=$(jq -r .slot "$req"); what=$(jq -r .what "$req")
+      [[ $verdict == approve ]] && done_word=approved || done_word=denied
+      log "**The owner $done_word #$id** for $(name_of $q): $what${*:+ ($*)}"
+      event $verdict 0 $q "the owner $done_word${*:+: $*}"
+      print -- "Request #$id: $done_word."
+    else
+      qf=$STATE/questions/$id.json; [[ -e $qf ]] || die "no question #$id"
+      [[ -e $STATE/questions/$id.answer ]] && die "question #$id was already answered"
+      text="$*"; [[ -n "$text" ]] || die 'usage: c4 answer ID "text"'
+      print -r -- "$text" > "$STATE/questions/$id.answer"
+      from=$(jq -r .from "$qf"); question=$(jq -r .text "$qf")
+      log "**The owner answered #$id** $text"; event answer 0 $from "the owner: $text"
+      send $from "[c4 answer from the owner to #$id]
+Q: $question
+A: $text"
+      print -- "Answered #$id."
+    fi ;;
+  wait)
+    secs=${1:-300}; start=$(wc -l < "$INBOX"); end=$(( $(date +%s) + secs ))
+    while (( $(date +%s) < end )); do
+      now=$(wc -l < "$INBOX")
+      (( now > start )) && { tail -n $(( now - start )) "$INBOX" | awk -F'\t' '{print "quarter " $2 " (" $3 "): " $4}'; exit 0; }
+      sleep 3
+    done
+    print -- "No reports in ${secs}s." ;;
+  status)
+    for q in $(slots); do
+      role=$(popt $q @role); st=$(popt $q @state); tk=$(popt $q @task)
+      print -- "── $(name_of $q) · ${role:-?} · ${st:-idle}${tk:+ · $tk}"
+      screen $q 200 | tail -n 5 | sed 's/^/   /'
+    done ;;
+  peek)
+    q=$1; check_q "$q"; lines=${2:-60}
+    screen $q $lines | tail -n $lines ;;
+  board) cat "$BOARD" ;;
+  summon-boss)
+    [[ -n "$(pane_of 0)" ]] && tmux has-session -t "$(pane_of 0)" 2>/dev/null && { print -- "The boss is already here."; exit 0; }
+    old=$(orch_q); [[ -n "$old" ]] && die "quarter $old is already the orchestrator in this session"
+    dir=$(tmux display -p -t "$(pane_of 1)" '#{pane_current_path}')
+    pid=$(tmux new-window -d -P -F '#{pane_id}' -t "$SESSION:" -n boss -c "$dir" -e C4_SESSION=$SESSION)
+    tmux set -w -t "$pid" window-size manual
+    tmux resize-window -t "$pid" -x 100 -y 200   # the boss panel in the browser is large and scrolls
+    print -- "0 $pid" >> "$REG"
+    tmux set -p -t "$pid" @role orchestrator
+    prompt_orchestrator 0 > "$STATE/prompt-q0.md"
+    log "**boss** joined as orchestrator"; event boss 0 0 "The boss is here"
+    perm=$(cat "$STATE/perm-flags" 2>/dev/null)
+    tmux send-keys -t "$pid" " clear; claude $perm --append-system-prompt-file ${(q)STATE}/prompt-q0.md --allowedTools 'Bash(c4:*)' -n 'c4 boss'" Enter
+    print -- "The boss is starting." ;;
+  *) die "unknown command '$cmd' (try: c4 help)" ;;
+esac
