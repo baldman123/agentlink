@@ -136,12 +136,14 @@ export const MessageItem = memo(function MessageItem({
   compact,
   onReply,
   replyTo,
+  note,
 }: {
   m: StoredMessage;
   continued: boolean;
   compact?: boolean;
   onReply?(m: StoredMessage): void;
   replyTo?: StoredMessage;
+  note?: React.ReactNode;
 }) {
   const { state } = useApp();
   const me = state.me;
@@ -188,6 +190,7 @@ export const MessageItem = memo(function MessageItem({
         </div>
         <div className="msg-foot">
           {who === "self" && <span className={`deliv deliv-${m.state}`}>{m.state === "delivered" ? "delivered" : m.state === "accepted" ? "sent" : "dropped"}</span>}
+          {note}
           {onReply && who !== "self" && (
             <button className="link" onClick={() => onReply(m)}>
               Reply

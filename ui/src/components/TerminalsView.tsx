@@ -8,6 +8,7 @@ import type { Pulse } from "../store.ts";
 import { Skeleton, useApp } from "./bits.tsx";
 import { ViewToggle } from "./ViewToggle.tsx";
 import { CommandBar } from "./CommandBar.tsx";
+import { PaneInput } from "./PaneInput.tsx";
 
 const SLOTS = [
   { agent: "worker-1", label: "WORKER 1", pos: "tl" },
@@ -108,10 +109,12 @@ function ScreenBody({ address, session, zoomed }: { address: Address; session?: 
 // one pane (worker quadrant, or the boss / any agent when zoomed)
 
 function Pane({
-  address, label, pos, session, active, ring, onZoom, zoomed, onClose,
+  address, label, pos, session, active, ring, onZoom, zoomed, onClose, canType,
 }: {
   address: Address; label: string; pos: string; session?: Session; active: boolean; ring: boolean;
   onZoom?(): void; zoomed?: boolean; onClose?(): void;
+  /** your own pane: the zoomed view gets a box that types into it */
+  canType?: boolean;
 }) {
   const st = useScreen(address);
   const chip = chipOf(session, st?.screen.busy);
@@ -144,6 +147,7 @@ function Pane({
         )}
       </header>
       <ScreenBody address={address} session={session} zoomed={zoomed} />
+      {zoomed && canType && <PaneInput agent={address.split("/")[1]} label={label === "BOSS" ? "the boss" : label.toLowerCase()} />}
     </section>
   );
 }
@@ -227,7 +231,7 @@ function pulsePath(p: Pulse, to: Address, pts: Record<string, Point>): string | 
 }
 
 export function TerminalsView() {
-  const { state, transport } = useApp();
+  const { state, transport, termFocus } = useApp();
   useScreensVersion(); // sharing labels follow screen arrivals
   const users = useMemo(
     () => Object.values(state.users).sort((a, b) => (a.user === state.me ? -1 : b.user === state.me ? 1 : a.user.localeCompare(b.user))),
@@ -235,10 +239,17 @@ export function TerminalsView() {
   );
   const [pick, setPick] = useState<string>(() => safeStorage("al.termUser", ""));
   useEffect(() => saveStorage("al.termUser", pick), [pick]);
-  const both = pick === "*";
-  const shown = both ? users : users.filter((u) => u.user === (users.some((x) => x.user === pick) ? pick : state.me ?? users[0]?.user));
+  const all = pick === "*";
+  const shown = all ? users : users.filter((u) => u.user === (users.some((x) => x.user === pick) ? pick : state.me ?? users[0]?.user));
   const shownKey = shown.map((u) => u.user).join(",");
   const [zoomed, setZoomed] = useState<Address | null>(null);
+
+  // "show pane" from the boss panel: zoom that agent, and show its team unless "all" already does
+  useEffect(() => {
+    if (!termFocus || Date.now() - termFocus.at > 2000) return;
+    if (pick !== "*") setPick(userOf(termFocus.address));
+    setZoomed(termFocus.address);
+  }, [termFocus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // subscribe only to what is on screen: the quadrant panes of the shown users, plus the zoomed pane
   const visible = useMemo(() => {
@@ -310,26 +321,26 @@ export function TerminalsView() {
       <div className="center-head">
         <div className="ch-title">
           <div className="ch-name">Terminals</div>
-          <div className="ch-task">Read-only live screens. Click a pane to zoom, the circle for the boss.</div>
+          <div className="ch-task">Live screens. Click a pane to zoom, the circle for the boss; your own zoomed panes take typing.</div>
         </div>
         <span className="grow" />
         {users.length > 0 && (
           <div className="seg" role="tablist" aria-label="Whose terminals">
             {users.map((u) => (
-              <button key={u.user} role="tab" aria-selected={!both && shown[0]?.user === u.user} className={!both && shown[0]?.user === u.user ? "on" : ""} onClick={() => setPick(u.user)}>
+              <button key={u.user} role="tab" aria-selected={!all && shown[0]?.user === u.user} className={!all && shown[0]?.user === u.user ? "on" : ""} onClick={() => setPick(u.user)}>
                 <span className="seg-dot" style={{ background: userColor(u.user) }} />
                 {u.user}
                 {screenStore.userSharing(u.user) === "no" && <span className="seg-note">not sharing</span>}
               </button>
             ))}
             {users.length > 1 && (
-              <button role="tab" aria-selected={both} className={both ? "on" : ""} onClick={() => setPick("*")}>both</button>
+              <button role="tab" aria-selected={all} className={all ? "on" : ""} onClick={() => setPick("*")}>all</button>
             )}
           </div>
         )}
         <ViewToggle />
       </div>
-      {/* local input: only for the signed-in user's own team, even in "both" */}
+      {/* local input: only for the signed-in user's own team, even in "all" */}
       {myTeam && shown.some((u) => u.user === state.me) && <CommandBar team={myTeam} />}
       {!state.snapshotReady ? (
         <div className="pad"><Skeleton lines={10} /></div>
@@ -337,7 +348,8 @@ export function TerminalsView() {
         <div className="empty big"><strong>No teams on the hub yet.</strong><span>Start a daemon and bridge on each laptop to see their terminals.</span></div>
       ) : (
         <div className="tstage-wrap">
-        <div className={`tstage-scroll ${both ? "both" : ""}`}>
+        {/* "all": every team stacked; with 3+ each block keeps a readable height and the stage scrolls */}
+        <div className={`tstage-scroll ${all ? "all" : ""} ${all && shown.length > 2 ? "many" : ""}`}>
           <div className="tstage" ref={stage}>
             <svg className="twires" width={size.w} height={size.h} aria-hidden>
               {shown.map((u) => {
@@ -348,7 +360,7 @@ export function TerminalsView() {
                   return a && <path key={`${u.user}${sl.agent}`} className="twire" d={`M${a.x} ${a.y} H${c.x} V${c.y}`} />;
                 });
               })}
-              {both && shown.length > 1 && shown.slice(1).map((u, i) => {
+              {all && shown.length > 1 && shown.slice(1).map((u, i) => {
                 const a = pts[`${shown[i].user}/orchestrator`];
                 const b = pts[`${u.user}/orchestrator`];
                 return a && b && <path key={`x${u.user}`} className="twire twire-cross" d={`M${a.x} ${a.y} L${b.x} ${b.y}`} />;
@@ -373,7 +385,7 @@ export function TerminalsView() {
         </div>
           {zoomed && (
             <div className="tzoom" onMouseDown={(e) => e.target === e.currentTarget && setZoomed(null)}>
-              <Pane address={zoomed} label={zoomLabel} pos="zoom" session={zoomSession} active ring={false} zoomed onClose={() => setZoomed(null)} />
+              <Pane address={zoomed} label={zoomLabel} pos="zoom" session={zoomSession} active ring={false} zoomed onClose={() => setZoomed(null)} canType={!!state.me && userOf(zoomed) === state.me} />
             </div>
           )}
         </div>

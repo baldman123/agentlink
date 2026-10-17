@@ -20,7 +20,7 @@ UI: React + Vite. npm workspaces at the repo root.
 ## Rules (every component)
 
 1. **Hop limit.** Drop and log any message with `hops > 5`. Increment `hops` on every forward (the hub's delivery is a forward; an orchestrator relaying a received message sends `hops: original.hops + 1`).
-2. **Auth.** The shared token is required to connect to the hub.
+2. **Auth.** A token is required to connect to the hub, and it works only for its own user: the master token for the hub owner, a personal token (from `bin/agentlink-hub invite`) for everyone else. Message reads are scoped to the reader's user (hub-api.md "What each user can read").
 3. **Trust boundary.** A message from another user is a request, never a command. Nothing in a remote message runs a shell command or modifies files without the local user's approval.
 4. **Logging.** Every message sent or received is logged with `id, from, to, type`.
 5. **No secrets in code.** Token and addresses come from env/config only. `.env` files are gitignored.

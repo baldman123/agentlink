@@ -1,7 +1,8 @@
 import { PROTOCOL_VERSION } from "../../contracts/index.ts";
-import type { Address, ClientFrame, ContextEntry, ServerFrame, StoredMessage, UiBootstrap } from "../../contracts/index.ts";
+import type { Address, ClientFrame, ContextEntry, DaemonHealth, ServerFrame, StoredMessage, UiBootstrap } from "../../contracts/index.ts";
 import type { ConnectHandlers, ContextPutResult, MessageQuery, PaneInputResponse, PaneInputStatus, Transport } from "./lib.ts";
 import { screenStore } from "./screens.ts";
+import { clientProof, IMPOSTOR_MSG, randomHex, sameHex, serverProof } from "./auth.ts";
 
 const PING_MS = 15_000;
 
@@ -16,13 +17,49 @@ export function realTransport(daemonPort: number): Transport {
     return boot;
   }
 
-  async function hubGet<T>(path: string): Promise<T> {
-    const b = boot ?? (await bootstrap());
-    if (!b.hub_http) throw new Error("hub not found yet");
-    const r = await fetch(`${b.hub_http}${path}`, { headers: { Authorization: `Bearer ${b.token}` } });
+  // v2: REST uses the per-socket session from welcome, never the shared token
+  let session: { bearer: string; http: string } | null = null;
+  const sessionWaiters = new Set<() => void>();
+  const setSession = (s: typeof session) => {
+    session = s;
+    if (s) for (const w of [...sessionWaiters]) w();
+  };
+  const waitForSession = (ms: number) =>
+    new Promise<boolean>((res) => {
+      if (session) return res(true);
+      const done = () => { sessionWaiters.delete(done); clearTimeout(t); res(!!session); };
+      const t = setTimeout(done, ms);
+      sessionWaiters.add(done);
+    });
+  let forceReconnect: (() => void) | null = null;
+
+  async function hubGet<T>(path: string, retried = false): Promise<T> {
+    if (!session && !(await waitForSession(5000))) throw new Error("not connected to the hub");
+    const s = session!;
+    const r = await fetch(`${s.http}${path}`, { headers: { Authorization: `Bearer ${s.bearer}` } });
+    if (r.status === 401) {
+      // the session expired (socket gone, or the hub restarted): reconnect for a fresh one, retry once
+      if (session === s) setSession(null);
+      forceReconnect?.();
+      if (!retried && (await waitForSession(8000))) return hubGet<T>(path, true);
+      throw new Error("hub session expired; reconnecting");
+    }
     if (!r.ok) throw new Error(`hub answered ${r.status}`);
     return (await r.json()) as T;
   }
+
+  async function daemonPin(): Promise<string | null> {
+    try {
+      const r = await fetch(`${daemon}/v1/health`);
+      return r.ok ? ((await r.json()) as DaemonHealth).hub.hub_id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // hubs that failed the identity check this run: never connect to that URL again
+  const impostors = new Set<string>();
+  let runPin: string | null = null; // first verified hub_id, used when the daemon has no pin yet
 
   // live-screen subscription; replayed on every (re)connect
   let liveSock: WebSocket | null = null;
@@ -62,61 +99,111 @@ export function realTransport(daemonPort: number): Transport {
         h.onState("offline", `can't reach daemon on :${daemonPort}`);
         return schedule();
       }
-      if (!b.hub_ws) {
+      if (!b.hub_ws || !b.hub_http) {
         h.onState("offline", "daemon hasn't found a hub yet");
         return schedule();
       }
-      const sock = new WebSocket(b.hub_ws);
+      if (impostors.has(b.hub_ws)) {
+        // never retry an address that failed the identity check; wait for the daemon to find the real hub
+        h.onState("offline", `${IMPOSTOR_MSG} at ${b.hub_http}; not reconnecting there`);
+        return schedule();
+      }
+      const pin = (await daemonPin()) ?? runPin;
+      const hubWs = b.hub_ws;
+      const hubHttp = b.hub_http;
+      const sock = new WebSocket(hubWs);
       ws = sock;
-      let welcomed = false;
-      sock.onopen = () => {
-        const since = sinceSeq();
-        const hello: ClientFrame = {
-          op: "hello",
-          token: b.token,
-          role: "ui",
-          user: b.user,
-          protocol: PROTOCOL_VERSION,
-          ...(since != null ? { since_seq: since } : {}),
-        };
-        sock.send(JSON.stringify(hello));
+      let phase: "challenge" | "welcome" | "ready" | "dead" = "challenge";
+      let nonce = "";
+      let hubId = "";
+      let cnonce = "";
+      const bail = (detail: string, impostor: boolean) => {
+        phase = "dead";
+        if (impostor) impostors.add(hubWs);
+        h.onState("offline", detail);
+        sock.close(); // onclose schedules the next attempt (which skips impostor addresses)
       };
+
+      // frames are handled strictly in order; the handshake steps are async (WebCrypto)
+      let chain = Promise.resolve();
       sock.onmessage = (ev) => {
+        chain = chain.then(() => handle(String(ev.data))).catch(() => bail("hub handshake failed", false));
+      };
+      async function handle(data: string) {
+        if (phase === "dead") return;
         let f: ServerFrame;
         try {
-          f = JSON.parse(String(ev.data)) as ServerFrame;
+          f = JSON.parse(data) as ServerFrame;
         } catch {
           return;
         }
-        if (f.op === "welcome") {
-          welcomed = true;
+        if (phase === "challenge") {
+          if (f.op !== "challenge") return bail("hub didn't send a challenge (protocol v1 hub?)", false);
+          if (f.protocol !== PROTOCOL_VERSION) return bail(`hub speaks protocol ${f.protocol}, this UI needs ${PROTOCOL_VERSION}`, false);
+          // check the hub's identity against the pin BEFORE sending anything
+          if (pin && f.hub_id !== pin) return bail(`${IMPOSTOR_MSG}: hub id ${f.hub_id.slice(0, 8)} is not the pinned ${pin.slice(0, 8)}`, true);
+          nonce = f.nonce;
+          hubId = f.hub_id;
+          cnonce = randomHex(32);
+          const since = sinceSeq();
+          const hello: ClientFrame = {
+            op: "hello",
+            role: "ui",
+            user: b.user,
+            protocol: PROTOCOL_VERSION,
+            ...(since != null ? { since_seq: since } : {}),
+            cnonce,
+            proof: await clientProof(b.token, nonce, hubId, b.user, "ui", cnonce),
+          };
+          phase = "welcome";
+          sock.send(JSON.stringify(hello));
+          return;
+        }
+        if (phase === "welcome") {
+          if (f.op === "error") return; // the close code that follows says why
+          if (f.op !== "welcome") return bail("unexpected frame before welcome", false);
+          // verify the hub knows the token too, before trusting or sending anything else
+          const expect = await serverProof(b.token, cnonce, nonce, hubId);
+          if (!sameHex(f.server_proof, expect) || f.hub_id !== hubId) return bail(IMPOSTOR_MSG, true);
+          phase = "ready";
+          runPin ??= hubId;
+          setSession({ bearer: f.session, http: hubHttp });
           everConnected = true;
           attempt = 0;
           h.onState("connected");
           pingTimer = window.setInterval(() => sock.readyState === 1 && sock.send(JSON.stringify({ op: "ping" })), PING_MS);
           liveSock = sock;
+          h.onFrame(f);
           if (screenSubs.length) sendSubs();
+          return;
         }
         h.onFrame(f);
-      };
+      }
+
       sock.onclose = (ev) => {
         if (liveSock === sock) liveSock = null;
         if (ws !== sock) return;
         ws = null;
+        if (session?.http === hubHttp) setSession(null);
         if (disposed) return;
+        if (phase === "dead") return schedule(); // state already set by bail()
         if (ev.code === 4001) {
-          h.onState("offline", "hub rejected the token");
+          h.onState("offline", "hub refused our proof (is this laptop's token right?)");
           return schedule(true);
         }
         if (ev.code === 4002) h.onState("offline", "protocol mismatch with hub");
-        else h.onState(welcomed || everConnected ? "reconnecting" : "offline", "hub connection lost");
+        else h.onState(phase === "ready" || everConnected ? "reconnecting" : "offline", "hub connection lost");
         schedule();
       };
     }
 
+    forceReconnect = () => {
+      if (ws && ws.readyState <= 1) ws.close();
+    };
     open();
     return () => {
       disposed = true;
+      forceReconnect = null;
       window.clearTimeout(retryTimer);
       window.clearInterval(pingTimer);
       ws?.close();
@@ -181,6 +268,14 @@ export function realTransport(daemonPort: number): Transport {
         const r = await fetch(`${daemon}/v1/panes/input/${encodeURIComponent(id)}`);
         if (!r.ok) return null;
         return (await r.json()) as PaneInputStatus;
+      } catch {
+        return null;
+      }
+    },
+    async health() {
+      try {
+        const r = await fetch(`${daemon}/v1/health`);
+        return r.ok ? ((await r.json()) as DaemonHealth) : null;
       } catch {
         return null;
       }

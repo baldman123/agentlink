@@ -22,6 +22,14 @@ export interface DeliveryRow {
   hops: number; // hops value of the delivered copy
 }
 
+export interface PersonRow {
+  user: string;
+  epoch: number;
+  created_at: string;
+  invited_at: string;
+  revoked_at: string | null;
+}
+
 export class HubDb {
   db: DatabaseSync;
 
@@ -84,6 +92,15 @@ export class HubDb {
         at TEXT NOT NULL,
         event TEXT NOT NULL
       );
+      -- People invited to this hub (everyone but the owner). Their token is derived from the master
+      -- token and the epoch (auth.ts personalToken), so no secret is stored here.
+      CREATE TABLE IF NOT EXISTS people (
+        user TEXT PRIMARY KEY,
+        epoch INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        invited_at TEXT NOT NULL,
+        revoked_at TEXT
+      );
     `);
   }
 
@@ -135,9 +152,15 @@ export class HubDb {
       .run(state, opts.delivered_at ?? null, opts.drop_reason ?? null, id);
   }
 
-  queryMessages(q: { address?: string; with?: string; limit: number; before?: string }): StoredMessage[] {
+  /** `viewer`: only messages from or to that user, plus broadcasts to "*". */
+  queryMessages(q: { address?: string; with?: string; limit: number; before?: string; viewer?: string }): StoredMessage[] {
     const where: string[] = [];
     const params: (string | number)[] = [];
+    if (q.viewer !== undefined) {
+      const prefix = `${q.viewer}/`;
+      params.push(prefix, prefix);
+      where.push("(instr(from_addr, ?) = 1 OR instr(to_addr, ?) = 1 OR to_addr = '*')");
+    }
     const reaches = (addr: string) => {
       const user = addr.split("/")[0];
       params.push(addr, `${user}/*`);
@@ -205,6 +228,30 @@ export class HubDb {
 
   knownUsers(): string[] {
     return (this.db.prepare("SELECT user FROM users ORDER BY user").all() as { user: string }[]).map((r) => r.user);
+  }
+
+  // ---- people ----
+  getPerson(user: string): PersonRow | null {
+    return (this.db.prepare("SELECT * FROM people WHERE user = ?").get(user) as PersonRow | undefined) ?? null;
+  }
+
+  listPeople(): PersonRow[] {
+    return this.db.prepare("SELECT * FROM people ORDER BY user").all() as unknown as PersonRow[];
+  }
+
+  /** Invites `user`, or re-invites them with the next epoch (which kills any earlier token). Returns the new row. */
+  invitePerson(user: string): PersonRow {
+    const now = new Date().toISOString();
+    const cur = this.getPerson(user);
+    if (cur) this.db.prepare("UPDATE people SET epoch = ?, invited_at = ?, revoked_at = NULL WHERE user = ?").run(cur.epoch + 1, now, user);
+    else this.db.prepare("INSERT INTO people (user, epoch, created_at, invited_at, revoked_at) VALUES (?, 1, ?, ?, NULL)").run(user, now, now);
+    return this.getPerson(user)!;
+  }
+
+  /** Returns false if the user was never invited or is already revoked. */
+  revokePerson(user: string): boolean {
+    const res = this.db.prepare("UPDATE people SET revoked_at = ? WHERE user = ? AND revoked_at IS NULL").run(new Date().toISOString(), user);
+    return Number(res.changes) > 0;
   }
 
   // ---- sessions ----

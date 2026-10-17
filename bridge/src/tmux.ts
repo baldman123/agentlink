@@ -6,6 +6,19 @@ import { join } from "node:path";
 
 export const PROMPT_RE = /Do you want to proceed\?|Enter to confirm|Esc to cancel/; // same as c4 send()
 export const BUSY_RE = /esc to interrupt/i;
+// Claude Code's live spinner line: "✢ Tinkering… (3s · ↓ 199 tokens)". A finished turn reads "✻ Cooked for 3s".
+const SPINNER_RE = /^\s*\S\s+[\p{L}'-]+…\s+\(/mu;
+const SPINNER_TAIL_LINES = 30; // the spinner sits just above the input box; todos and notices can sit between
+
+/**
+ * Is the Claude in this pane mid-turn? The footer's "esc to interrupt" isn't enough on its own: after a pasted
+ * prompt (how c4 and the website deliver them) the footer shows "paste again to expand" for the whole turn.
+ */
+export function isBusy(screen: string): boolean {
+  if (BUSY_RE.test(screen)) return true;
+  const lines = screen.replace(/\s+$/, "").split("\n");
+  return SPINNER_RE.test(lines.slice(-SPINNER_TAIL_LINES).join("\n"));
+}
 
 export class Tmux {
   constructor(private socket: string | null) {}

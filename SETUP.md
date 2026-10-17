@@ -1,10 +1,10 @@
-# Setting up agentlink on two laptops
+# Setting up agentlink for two or more laptops
 
-agentlink connects the claude4 team on one laptop to the claude4 team on another, so both teams see each other's status and can send each other tasks. One laptop runs the hub. Each laptop runs a daemon, a bridge to its claude4 session, and the web app.
+agentlink connects the claude4 teams on several laptops, so every team sees the others' status and they can send each other tasks. One laptop runs the hub. Each laptop runs a daemon, a bridge to its claude4 session, and the web app. There's no fixed limit on how many people join; each one needs an invite from the hub laptop.
 
-Both laptops need Node 22.5 or newer (`node --version`), tmux, and claude4. They must be on the same network.
+Every laptop needs Node 22.5 or newer (`node --version`), tmux, and claude4. They must be on the same network.
 
-## Laptop 1: host the hub
+## Host the hub (once)
 
 ```sh
 cd ~/agentlink
@@ -21,37 +21,68 @@ The script prints something like this:
 ```
 agentlink is up for alex (c4 session claude4web; messages for workers go to the orchestrator)
   app        http://127.0.0.1:7780/?daemon=7701
-  hub page   http://192.168.1.20:7700/
-  other laptop joins with:  scripts/team-up.sh --user <name> --hub-url http://192.168.1.20:7700
-  token      3f9c…
-             (new; saved in /Users/alex/agentlink/data/.token. The other laptop needs it.)
+  hub page   http://192.168.1.20:7700/   (hub id 3c0f…)
+  add people bin/agentlink-hub invite <name>     (one per person; prints their token and join command)
+             bin/agentlink-hub list | revoke <name>
+  master     new token saved in /Users/alex/agentlink/data/.token. It works only for alex; don't give it to anyone.
 ```
 
-Give the other person the `--hub-url` line and the token. Send the token privately (in person, or a direct message); anyone who has it can join the hub. The token is printed only the first time. Later runs reuse the saved one, and `cat data/.token` shows it again.
+The master token in `data/.token` is yours alone. The hub accepts it only from the user that hosts the hub (`alex` here), so even if it leaked, nobody could use it under their own name.
 
 Open the app URL in a browser.
 
-## Laptop 2: join
+## Invite someone
 
-Copy the project folder without `node_modules` and `data`. For example, from laptop 1:
+On the hub laptop, once per person:
+
+```sh
+bin/agentlink-hub invite sam
+```
+
+It prints a personal token for sam and the exact command sam runs:
+
+```
+invited sam
+
+  token   9be1…
+          (shown only this once; send it to sam privately, never in a public channel)
+
+On sam's laptop, with a copy of the project (see SETUP.md) and npm install done:
+
+  scripts/team-up.sh --user sam --join 3c0f… --hub-url http://192.168.1.20:7700
+```
+
+Send sam the token privately (in person, or a direct message) and the command any way you like. Treat it like a password: whoever holds it can connect as sam. It works under no other name, though, so it can't be used to pose as alex or anyone else. The token is shown once. If it gets lost, run `invite sam` again. That issues a new token, and the old one stops working at once.
+
+To see who has access: `bin/agentlink-hub list`. To take it away: `bin/agentlink-hub revoke sam`. Sam's daemon and app are disconnected immediately and the token is dead; inviting sam again later gives a new one.
+
+## Join from another laptop
+
+Copy the project folder without `node_modules` and `data`. For example, from the hub laptop:
 
 ```sh
 rsync -a --exclude node_modules --exclude data ~/agentlink/ sam@laptop2.local:agentlink/
 ```
 
-A zip or a git clone of the branch works just as well. Then, on laptop 2:
+A zip or a git clone of the branch works just as well. Then, on sam's laptop, run the command the invite printed:
 
 ```sh
 cd ~/agentlink
 npm install
-scripts/team-up.sh --user sam --hub-url http://192.168.1.20:7700
+scripts/team-up.sh --user sam --join 3c0f… --hub-url http://192.168.1.20:7700
 ```
 
-It asks the same question about the claude4 session, then for the token. Paste it and press Enter. To skip the prompt, set `AGENTLINK_TOKEN` first.
+It asks the same question about the claude4 session, then for the token. Paste it and press Enter. To skip the prompt, set `AGENTLINK_TOKEN` first. The `--user` must be the name the invite was for.
 
-Leave out `--hub-url` and the daemon looks for the hub on the network by itself (mDNS). That fails on many office and guest networks, so the URL is the safer choice.
+With `--join`, the daemon finds the hub by its id even after the hub laptop's IP changes; `--hub-url` is only a hint for where to look first.
 
-Open the app URL it prints. Both teams should now show up in the app, five sessions each.
+Open the app URL it prints. Every team that has joined shows up in the app, five sessions each. A third or fourth person does exactly the same: one `invite` on the hub laptop, one `team-up.sh` on theirs.
+
+What other people can see: everyone's sessions and tasks, the shared context, and the terminals of teams that turned on `--share-screens`. Messages are private to the people in them. Sam sees messages from and to sam's own agents, plus broadcasts to everyone, but not what alex and a third person send each other.
+
+## Moving from the old shared token
+
+Earlier versions gave every laptop the same token. Once the hub runs this version, that token works only for the hub's own user, and everyone else is offline until they get a personal token. For each person who had joined (for example `sam`): run `bin/agentlink-hub invite sam` on the hub laptop, then on sam's laptop delete `data/.token`, run `scripts/team-down.sh`, and run `scripts/team-up.sh` again, pasting the new token. Their history, context and pending messages are kept at the hub.
 
 ## Day to day
 
@@ -77,7 +108,7 @@ The summary line `screens    shared with everyone on the hub` or `screens    not
 What is shared, once it's on:
 
 - The last 120 lines of each of the five panes (the boss and quarters 1-4), with their colours, refreshed about once a second while the pane changes.
-- Everyone connected to the hub can watch: anyone who has the token, on either laptop.
+- Everyone connected to the hub can watch: the host and every person invited, on every laptop.
 - It is read-only. Nothing in agentlink types into a pane because of a screen, and the app has no way to send keys.
 - The hub keeps only the latest screen of each pane, in memory. Screens are not written to the hub's database or logs, and they disappear when a pane closes or the bridge stops.
 
@@ -117,7 +148,7 @@ The app or `team-up.sh` says the hub link is `connecting` or `reconnecting`.
 
 The hub answers, but the link stays `offline`.
 
-- The token is wrong. On laptop 2, delete `data/.token`, run `scripts/team-down.sh`, then `team-up.sh` again and paste the right one.
+- The token is wrong, revoked, or for a different name. The hub logs `auth.failed` with `"why":"user not invited or revoked"` and the user name when the name has no active invite. On the hub laptop, `bin/agentlink-hub list` shows who is invited; `bin/agentlink-hub invite <name>` issues a fresh token. Then on the joining laptop delete `data/.token`, run `scripts/team-down.sh`, and `team-up.sh` again with the same `--user`, pasting the new token.
 - The log says `hub.id_changed`. The daemon remembers which hub it joined and refuses a different one at the same address, so that a stranger's machine can't collect the token. If the hub really was replaced (for example, laptop 1 deleted its `data` folder), start the daemon once with `AGENTLINK_HUB_REPIN=1 scripts/team-up.sh ...` after a `team-down.sh`.
 
 Messages arrive in the app but not in the claude4 panes.

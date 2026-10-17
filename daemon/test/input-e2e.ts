@@ -43,6 +43,7 @@ function startDaemon(user: User) {
     AGENTLINK_DAEMON_PORT: String(PORTS[user]),
     AGENTLINK_DAEMON_DB: path.join(tmp, `daemon-${user}.sqlite`),
     AGENTLINK_INPUT_RESULT_MS: "1500",
+    AGENTLINK_SCAN: "0",
   });
 }
 async function stop(p: ChildProcess) {

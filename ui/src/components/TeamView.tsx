@@ -4,6 +4,7 @@ import { HUMAN_AGENT } from "../../../contracts/index.ts";
 import { userColor, userOf } from "../lib.ts";
 import { sortSessions, viaClaude4, type Pulse } from "../store.ts";
 import { Avatar, Skeleton, StatusDot, useApp, useNow } from "./bits.tsx";
+import { UsageMeter } from "./UsageMeter.tsx";
 import { ViewToggle } from "./ViewToggle.tsx";
 
 const PULSE_MS = 1100; // travel time along the line
@@ -65,6 +66,7 @@ function Cluster({ u, me, rings, open }: { u: UserPresence; me: string | null; r
           <span className="me-mark" aria-hidden>◆</span> human
         </button>
       </header>
+      <UsageMeter user={u.user} />
       <div className="cl-grid">
         {(["worker-1", "worker-2"] as const).map((w) => (
           <Node key={w} slot={w} s={by.get(w)} ring={rings.has(`${u.user}/${w}`)} onOpen={() => open(`${u.user}/${w}`)} />

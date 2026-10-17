@@ -1,4 +1,14 @@
-import type { InboxItem, ScreenUpdate, Session, SessionKind, SessionStatus } from "../../contracts/index.ts";
+import type {
+  InboxItem,
+  OutboxItem,
+  ScreenUpdate,
+  SendRequest,
+  SendResponse,
+  Session,
+  SessionKind,
+  SessionStatus,
+  StoredMessage,
+} from "../../contracts/index.ts";
 
 // Local terminal input (contracts/input.md). The contract has no shared types, so its shapes are defined here as written.
 export interface InputRequest {
@@ -52,6 +62,20 @@ export class Daemon {
 
   async deleteScreen(agent: string): Promise<void> {
     await this.req("DELETE", `/v1/screens/${encodeURIComponent(agent)}`);
+  }
+
+  async send(req: SendRequest): Promise<SendResponse> {
+    return (await this.req("POST", "/v1/send", req)).json;
+  }
+
+  /** Messages still waiting to reach the hub. */
+  async outbox(): Promise<OutboxItem[]> {
+    return (await this.req("GET", "/v1/outbox")).json.items;
+  }
+
+  /** Hub history (proxied), newest first, for one address: it matches from OR to. */
+  async messages(address: string, limit = 100): Promise<StoredMessage[]> {
+    return (await this.req("GET", `/v1/messages?address=${encodeURIComponent(address)}&limit=${limit}`)).json.messages;
   }
 
   async unhandledInbox(): Promise<InboxItem[]> {

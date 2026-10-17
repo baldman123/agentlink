@@ -15,7 +15,8 @@ import {
   type UiBootstrap,
 } from "../../contracts/index.ts";
 import type { Config } from "./config.ts";
-import { HubOffline, type HubLink } from "./hublink.ts";
+import { HubOffline } from "./hublink.ts";
+import type { DaemonHubLink } from "./link.ts";
 import { InputChannel } from "./input.ts";
 import { log, logMsg } from "./log.ts";
 import type { Store } from "./store.ts";
@@ -53,9 +54,11 @@ interface SseClient {
   agent: string | null;
 }
 
-export function createServer(cfg: Config, store: Store, hub: HubLink) {
+export function createServer(cfg: Config, store: Store, hub: DaemonHubLink) {
   const sse = new Set<SseClient>();
   const input = new InputChannel(); // only these HTTP handlers can reach it; the hub link has no reference
+  // ...except in cloud mode, where the website's signed frames come in through CloudInputGate (input.md)
+  hub.attachInput?.(input);
   const allowedHosts = new Set([`127.0.0.1:${cfg.port}`, `localhost:${cfg.port}`, `[::1]:${cfg.port}`]);
 
   hub.on("inbox", (item: InboxItem) => {
@@ -108,7 +111,14 @@ export function createServer(cfg: Config, store: Store, hub: HubLink) {
       const body: DaemonHealth = {
         ok: true,
         user: cfg.user,
-        hub: { state: hub.state, url: hub.target?.url ?? null, via: hub.target?.via ?? null, hub_name: hub.hubName },
+        hub: {
+          state: hub.state,
+          url: hub.target?.url ?? null,
+          via: hub.target?.via ?? null,
+          hub_name: hub.hubName,
+          hub_id: hub.hubId,
+          searching: hub.searching,
+        },
         outbox_depth: store.outboxDepth(),
         inbox_unhandled: store.inboxUnhandled(),
       };
@@ -120,7 +130,8 @@ export function createServer(cfg: Config, store: Store, hub: HubLink) {
       const body: UiBootstrap = {
         user: cfg.user,
         hub_http: httpUrl,
-        hub_ws: httpUrl ? httpUrl.replace(/^http/, "ws") + "/ws" : null,
+        // the website has no hub socket; its live feed is Supabase Realtime (contracts/cloud-api.md)
+        hub_ws: httpUrl && cfg.hubMode === "lan" ? httpUrl.replace(/^http/, "ws") + "/ws" : null,
         token: cfg.token,
         daemon: `http://127.0.0.1:${cfg.port}`,
       };
@@ -184,7 +195,8 @@ export function createServer(cfg: Config, store: Store, hub: HubLink) {
           title: b.title,
           kind: b.kind,
           body: b.body,
-          author: `${cfg.user}/${agent}`,
+          author: `${cfg.user}/${agent}`, // the LAN hub reads author
+          agent, // the website reads agent and sets author itself (contracts/cloud-api.md "Shared context")
           ...(b.base_version !== undefined ? { base_version: b.base_version } : {}),
         };
         return proxy(res, "PUT", `/api/context/${key}`, write);

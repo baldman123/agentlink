@@ -10,6 +10,8 @@ import http from "node:http";
 import { pathToFileURL } from "node:url";
 import WebSocket from "ws";
 import type { ServerFrame } from "../../contracts/index.ts";
+import { openUi } from "./v2.ts";
+import { personalToken } from "../../hub/src/auth.ts";
 
 const TOKEN = "e2e-test-token";
 const HUB_PORT = Number(process.env.E2E_BASE ?? 7790);
@@ -43,6 +45,7 @@ function startHub(other = false) {
   if (REAL) {
     return run("hub", ["src/index.ts"], path.resolve(daemonDir, "../hub"), {
       AGENTLINK_TOKEN: TOKEN,
+      AGENTLINK_HUB_OWNER: "alex",
       AGENTLINK_HUB_PORT: String(HUB_PORT),
       AGENTLINK_HUB_DB: path.join(tmp, other ? "hub-other.sqlite" : "hub.sqlite"),
       AGENTLINK_MDNS: "0",
@@ -55,15 +58,34 @@ function startHub(other = false) {
   });
 }
 
+// The real hub's owner is alex (master token). sam is invited once (epoch 1) and signs with a personal
+// token, which is derived, so the test can compute it. The fake hub takes the shared token from anyone.
+// The real hub only takes the master token from its owner, so the test's ui socket signs in as alex there.
+const UI_USER = REAL ? "alex" : "e2e-ui";
+const tokenOf = (user: User) => (REAL && user !== "alex" ? personalToken(TOKEN, user, 1) : TOKEN);
+
+/** Real hub only: invite sam through the loopback admin API (the db survives hub restarts, so once). */
+async function inviteSam() {
+  await until("hub up", async () => (await fetch(`http://127.0.0.1:${HUB_PORT}/api/health`)).ok);
+  const res = await fetch(`http://127.0.0.1:${HUB_PORT}/api/admin/people`, {
+    method: "POST",
+    headers: { authorization: `Admin ${TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ user: "sam" }),
+  });
+  const body = await res.json();
+  if (body.token !== tokenOf("sam")) throw new Error(`invite gave an unexpected token (epoch ${body.epoch})`);
+}
+
 function startDaemon(user: User, extraEnv: Record<string, string> = {}) {
   return run(user, [path.join(daemonDir, "src/index.ts")], tmp, {
     ...extraEnv,
     AGENTLINK_USER: user,
-    AGENTLINK_TOKEN: TOKEN,
+    AGENTLINK_TOKEN: tokenOf(user),
     AGENTLINK_HUB_URL: `http://127.0.0.1:${HUB_PORT}`,
     AGENTLINK_DISCOVERY: "manual",
     AGENTLINK_DAEMON_PORT: String(PORTS[user]),
     AGENTLINK_DAEMON_DB: path.join(tmp, `daemon-${user}.sqlite`),
+    AGENTLINK_SCAN: "0", // never probe the real subnet (port 7700 is the live hub); discovery-e2e covers scanning
   });
 }
 
@@ -103,28 +125,26 @@ const health = (u: User) => api(u, "GET", "/v1/health").then((r) => r.body);
 const connected = (u: User) => until(`${u} connected`, async () => (await health(u)).hub.state === "connected");
 const inbox = (u: User, q = "") => api(u, "GET", `/v1/inbox${q}`).then((r) => r.body.messages as any[]);
 
-/** Hub REST with the test token. */
+/** Hub REST (v2: a session bearer from a live ui socket; the raw token is refused). */
 async function hubApi(p: string): Promise<any> {
-  const res = await fetch(`http://127.0.0.1:${HUB_PORT}${p}`, { headers: { authorization: `Bearer ${TOKEN}` } });
-  return res.json();
+  const s = await openUi(`ws://127.0.0.1:${HUB_PORT}/ws`, TOKEN, UI_USER);
+  try {
+    const res = await fetch(`http://127.0.0.1:${HUB_PORT}${p}`, { headers: { authorization: `Bearer ${s.session}` } });
+    return await res.json();
+  } finally {
+    s.ws.close();
+  }
 }
 
 /** A role=ui hub socket (real hub only), collecting server frames. */
 class UiSock {
-  frames: ServerFrame[] = [];
-  private constructor(private ws: WebSocket) {
-    ws.on("message", (d) => this.frames.push(JSON.parse(d.toString())));
+  frames: ServerFrame[];
+  private constructor(private ws: WebSocket, frames: ServerFrame[]) {
+    this.frames = frames; // openUi keeps appending to this array
   }
   static async open(): Promise<UiSock> {
-    const ws = new WebSocket(`ws://127.0.0.1:${HUB_PORT}/ws`);
-    const sock = new UiSock(ws);
-    await new Promise<void>((resolve, reject) => {
-      ws.once("open", () => {
-        ws.send(JSON.stringify({ op: "hello", token: TOKEN, role: "ui", user: "e2e-ui", protocol: 1 }));
-        resolve();
-      });
-      ws.once("error", reject);
-    });
+    const s = await openUi(`ws://127.0.0.1:${HUB_PORT}/ws`, TOKEN, UI_USER);
+    const sock = new UiSock(s.ws, s.frames);
     await sock.wait((f) => f.op === "snapshot");
     return sock;
   }
@@ -142,6 +162,7 @@ class UiSock {
 async function main() {
   console.log(`tmp dir: ${tmp}  hub: ${REAL ? "real" : "fake"}`);
   let hub = startHub();
+  if (REAL) await inviteSam();
   let alex = startDaemon("alex");
   let sam = startDaemon("sam");
   await connected("alex");

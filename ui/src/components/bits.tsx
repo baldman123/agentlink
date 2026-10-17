@@ -13,6 +13,9 @@ export interface AppCtx {
   contextFocus: { key: string; at: number } | null;
   view: "chat" | "team" | "terminals";
   setView(v: "chat" | "team" | "terminals"): void;
+  /** Switch to the Terminals view with this agent's pane zoomed. */
+  openTerminal(address: Address): void;
+  termFocus: { address: Address; at: number } | null;
 }
 export const Ctx = createContext<AppCtx>(null!);
 export const useApp = () => useContext(Ctx);

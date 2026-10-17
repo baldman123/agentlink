@@ -1,6 +1,7 @@
 import type {
   Address,
   ContextEntry,
+  DaemonHealth,
   EventFrame,
   ServerFrame,
   Session,
@@ -51,6 +52,9 @@ export interface State {
   pulses: Pulse[];
   /** Local-only "clear chat history": messages before this are hidden in this browser (nothing is deleted). */
   historyCutoff: string | null;
+  hubId: string | null; // from the UI socket's welcome
+  /** The daemon's view of its hub link (GET /v1/health): how it was found, the pinned id, searching. */
+  daemonHub: DaemonHealth["hub"] | null;
 }
 
 export const initialState: State = {
@@ -71,6 +75,8 @@ export const initialState: State = {
   flash: {},
   pulses: [],
   historyCutoff: null,
+  hubId: null,
+  daemonHub: null,
 };
 
 export const cutoffKey = (user: string) => `al.historyCutoff.${user}`;
@@ -102,7 +108,8 @@ export type Action =
   | { type: "history"; address: Address; status: State["history"][string]; messages?: StoredMessage[] }
   | { type: "context.local"; entry: ContextEntry }
   | { type: "toast.done"; id: string }
-  | { type: "history.cutoff"; at: string | null };
+  | { type: "history.cutoff"; at: string | null }
+  | { type: "health"; hub: DaemonHealth["hub"] | null };
 
 const LIVE_WINDOW_MS = 15_000; // replayed events older than this don't toast
 
@@ -111,6 +118,42 @@ export function myChats(s: State): Address[] {
   if (!s.me) return [];
   const own = s.users[s.me]?.sessions ?? [];
   return [`${s.me}/${HUMAN_AGENT}`, ...sortSessions(own.filter((x) => x.agent !== HUMAN_AGENT)).map((x) => x.address)];
+}
+
+/** One message in the signed-in user's chat with their own boss: <me>/human <-> <me>/orchestrator. */
+export function inBossThread(me: string | null, m: StoredMessage): boolean {
+  if (!me || m.type === "status" || m.type === "context_update") return false;
+  const human = `${me}/${HUMAN_AGENT}`, boss = `${me}/orchestrator`;
+  return (m.from === human && m.to === boss) || (m.from === boss && m.to === human);
+}
+
+/** The boss thread, oldest first. */
+export function bossThread(s: State): StoredMessage[] {
+  return Object.values(s.messages)
+    .filter((m) => inBossThread(s.me, m))
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+}
+
+/** How long a message to the boss shows "waiting" without an answer before we stop claiming it's coming. */
+export const BOSS_WAIT_MAX_MS = 30 * 60_000;
+
+/**
+ * Messages you sent the boss that it hasn't answered yet: id -> sent at (ms). Answered = the boss sent
+ * something with that reply_to (a result, normally; a chat reply counts too). Dropped messages and ones
+ * older than BOSS_WAIT_MAX_MS aren't waiting on anything.
+ */
+export function bossPending(s: State, now = Date.now()): Record<string, number> {
+  if (!s.me) return {};
+  const boss = `${s.me}/orchestrator`;
+  const thread = bossThread(s);
+  const answered = new Set(thread.filter((m) => m.from === boss && m.reply_to).map((m) => m.reply_to!));
+  const out: Record<string, number> = {};
+  for (const m of thread) {
+    if (m.from === boss || m.state === "dropped" || answered.has(m.id)) continue;
+    const at = Date.parse(m.timestamp);
+    if (now - at < BOSS_WAIT_MAX_MS) out[m.id] = at;
+  }
+  return out;
 }
 
 export function findSession(s: State, a: Address): Session | undefined {
@@ -239,11 +282,13 @@ export function reducer(s: State, a: Action): State {
       return { ...s, me: a.me, hubUrl: a.hubUrl, historyCutoff: s.me === a.me ? s.historyCutoff : safeStorage<string | null>(cutoffKey(a.me), null) };
     case "history.cutoff":
       return { ...s, historyCutoff: a.at };
+    case "health":
+      return { ...s, daemonHub: a.hub };
     case "conn":
       return { ...s, conn: a.state, connDetail: a.detail ?? "" };
     case "frame": {
       const f = a.frame;
-      if (f.op === "welcome") return { ...s, hubName: f.hub_name };
+      if (f.op === "welcome") return { ...s, hubName: f.hub_name, hubId: f.hub_id };
       if (f.op === "snapshot") {
         const users: State["users"] = {};
         for (const u of f.users) users[u.user] = u;

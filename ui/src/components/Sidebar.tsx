@@ -1,12 +1,13 @@
 import type { Address } from "../../../contracts/index.ts";
 import { HUMAN_AGENT } from "../../../contracts/index.ts";
 import { relTime, userOf } from "../lib.ts";
-import { findSession, sortSessions, viaClaude4 } from "../store.ts";
+import { bossPending, findSession, sortSessions, viaClaude4 } from "../store.ts";
 import { Addr, Avatar, Skeleton, StatusDot, useApp, useNow } from "./bits.tsx";
 import { MessageList } from "./ChatView.tsx";
 import { ContextPanel } from "./ContextPanel.tsx";
+import { OrchestratorPanel } from "./OrchestratorPanel.tsx";
 
-export type Tab = "sessions" | "context";
+export type Tab = "boss" | "sessions" | "context";
 
 function Sessions() {
   const { state, openFeed } = useApp();
@@ -88,9 +89,13 @@ export function Sidebar({ tab, setTab, feed, setFeed }: { tab: Tab; setTab(t: Ta
   const { state } = useApp();
   const sessionCount = Object.values(state.users).reduce((n, u) => n + u.sessions.filter((s) => s.agent !== HUMAN_AGENT && s.status !== "offline").length, 0);
   const ctxCount = Object.keys(state.context).length;
+  const waiting = Object.keys(bossPending(state)).length;
   return (
     <aside className="sidebar">
       <div className="tabs" role="tablist">
+        <button role="tab" aria-selected={tab === "boss"} className={tab === "boss" ? "on" : ""} onClick={() => setTab("boss")}>
+          Boss {waiting > 0 && <span className="count count-wait" title={`${waiting} waiting for the boss`}>{waiting}</span>}
+        </button>
         <button role="tab" aria-selected={tab === "sessions"} className={tab === "sessions" ? "on" : ""} onClick={() => setTab("sessions")}>
           Sessions <span className="count">{sessionCount}</span>
         </button>
@@ -99,7 +104,7 @@ export function Sidebar({ tab, setTab, feed, setFeed }: { tab: Tab; setTab(t: Ta
         </button>
       </div>
       <div className="tabpanel" role="tabpanel">
-        {tab === "sessions" ? feed ? <Feed address={feed} close={() => setFeed(null)} /> : <Sessions /> : <ContextPanel />}
+        {tab === "boss" ? <OrchestratorPanel /> : tab === "sessions" ? feed ? <Feed address={feed} close={() => setFeed(null)} /> : <Sessions /> : <ContextPanel />}
       </div>
     </aside>
   );

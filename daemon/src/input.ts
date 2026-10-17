@@ -1,11 +1,14 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { log } from "./log.ts";
 
 // Local terminal input (contracts/input.md): the UI's command bar -> this daemon (memory only) -> the
 // bridge's SSE stream -> the panes. Only the HTTP handlers for /v1/panes/input* hold a reference to
 // this object; the hub link never does, so nothing that arrives from the hub can reach the panes.
-// The text is never logged.
+// One exception, cloud mode only (input.md "Cloud input"): the website's signed input frames, checked by
+// CloudInputGate (cloudinput.ts), which gets nothing but submit(). The text is never logged.
+// Emits "finished" (id, state, results) when a request is done or failed.
 
 export type InputState = "pending" | "done" | "failed";
 
@@ -26,13 +29,14 @@ const RESULT_WAIT_MS = Number(process.env.AGENTLINK_INPUT_RESULT_MS) || 60_000; 
 const RETAIN_MS = 10 * 60_000;
 const KEEPALIVE_MS = 15_000;
 
-export class InputChannel {
+export class InputChannel extends EventEmitter {
   private requests = new Map<string, InputRequest>();
   private bridge: http.ServerResponse | null = null;
   private sweepTimer: NodeJS.Timeout;
   private keepaliveTimer: NodeJS.Timeout;
 
   constructor() {
+    super();
     this.sweepTimer = setInterval(() => this.sweep(), 1_000);
     this.keepaliveTimer = setInterval(() => this.bridge?.write(": keepalive\n\n"), KEEPALIVE_MS);
   }
@@ -94,6 +98,7 @@ export class InputChannel {
     r.results = kept;
     r.state = "done";
     log("input.result", { id, results: kept });
+    this.emit("finished", id, r.state, kept);
     return "ok";
   }
 
@@ -107,6 +112,7 @@ export class InputChannel {
     r.state = "failed";
     r.results = Object.fromEntries(r.agents.map((a) => [a, `failed: ${why}`]));
     log("input.failed", { id: r.id, reason: why });
+    this.emit("finished", r.id, r.state, r.results);
   }
 
   private sweep() {

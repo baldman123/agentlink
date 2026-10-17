@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+data
+orchestrator/data
+orchestrator/logs
+**/.env*
+!cloud/.env.example
+**/.next
+**/test-results
+**/playwright-report
+cloud/e2e/screenshots
+cloud/supabase/.temp
+**/*.sqlite
+**/*.log
+.git

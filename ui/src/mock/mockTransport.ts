@@ -17,6 +17,7 @@ import type {
 import { involves, PANE_INPUT_MAX, params, userOf, type ConnectHandlers, type PaneInputStatus, type PaneResult, type Transport } from "../lib.ts";
 import { screenStore } from "../screens.ts";
 import { makeScreenSim } from "./screens.ts";
+import { clientProof, IMPOSTOR_MSG, randomHex, sameHex, serverProof } from "../auth.ts";
 
 const iso = (msAgo = 0) => new Date(Date.now() - msAgo).toISOString();
 const uuid = () => crypto.randomUUID();
@@ -48,6 +49,18 @@ export function mockTransport(daemonPort: number): Transport {
     session("sam", "worker-3", "worker", "working", "Payments client: read invoices", 20_000),
     session("sam", "worker-4", "worker", "working", "Webhook load test", 50_000),
   ]);
+  // ?mockteams=N (3..6): more claude4 teams on the hub, for the Terminals "all" grid
+  const EXTRA = ["kim", "ravi", "jo", "mei"];
+  const teamCount = Math.min(6, Math.max(2, Number(params.get("mockteams")) || 2));
+  EXTRA.slice(0, teamCount - 2).forEach((u, i) =>
+    addUser(u, true, `192.168.1.${50 + i}`, [
+      session(u, "orchestrator", "orchestrator", "working", "coordinating 4 workers", 30_000 + i * 5000),
+      session(u, "worker-1", "worker", "working", "Search indexing", 12_000),
+      session(u, "worker-2", "worker", "idle", "", 5 * 60_000),
+      session(u, "worker-3", "worker", "waiting", `Waiting on ${me}/orchestrator`, 90_000),
+      session(u, "worker-4", "worker", "working", "Load-testing the API", 40_000),
+    ]),
+  );
 
   const context = new Map<string, ContextEntry>();
   const ctx = (e: Omit<ContextEntry, "updated_at"> & { ago: number }) =>
@@ -209,7 +222,7 @@ export function mockTransport(daemonPort: number): Transport {
   // steady team chatter: orchestrators hand out work, workers report back, statuses flip
   const TASKS = ["Add pagination to /invoices", "Fix flaky migration test", "Write PDF snapshot tests", "Retry webhook deliveries", "Review payments client PR", "Profile invoice query"];
   const chatter = () => {
-    const team = pick([me, other]);
+    const team = pick([...users.keys()]);
     const w = `${team}/worker-${1 + Math.floor(Math.random() * 4)}`;
     const roll = Math.random();
     if (roll < 0.4) {
@@ -220,7 +233,7 @@ export function mockTransport(daemonPort: number): Transport {
       sendMsg(w, `${team}/orchestrator`, "result", pick(["Done, tests pass.", "Pushed to branch, PR open.", "Blocked: need the schema decision.", "Fixed; it was a race in setup."]));
       touch(w, { status: pick<SessionStatus>(["idle", "idle", "waiting"]), task: "" });
     } else if (roll < 0.9) {
-      const peer = `${team === me ? other : me}/orchestrator`;
+      const peer = `${pick([...users.keys()].filter((u) => u !== team))}/orchestrator`;
       sendMsg(`${team}/orchestrator`, peer, "chat", "Status: two workers busy, two free. Anything for us?");
     } else {
       touch(`${team}/orchestrator`, { status: pick<SessionStatus>(["working", "working", "waiting"]) });
@@ -250,7 +263,33 @@ export function mockTransport(daemonPort: number): Transport {
     last_seq: seq,
   });
 
+  // the daemon's hub link (DaemonHealth.hub). The hub's identity is its id; its address can change.
+  const HUB_ID = "7f3a9c21-4d0e-4b8a-9f61-2c5e8d1a0b37";
+  let hubIp = "192.168.1.20";
+  const hubLink: { via: "mdns" | "last_known" | "scan" | "manual" | null; searching: boolean } = { via: "mdns", searching: false };
+  const hubUrl = () => `http://${hubIp}:7700`;
+
+  let mockSession: string | null = null;
   const api = {
+    /** v2 handshakes attempted (tests check an impostor is not retried) */
+    handshakes: 0,
+    /** current REST session from the last welcome (REST calls are refused without one) */
+    session: () => mockSession,
+    /** GET /v1/health calls so far (tests check the UI polls only while the hub socket is down) */
+    healthCalls: 0,
+    /** The hub vanishes (its IP changed): the daemon searches for `ms`, then finds it again at a new address. */
+    search(ms = 8000, via: "last_known" | "scan" | "mdns" = "scan") {
+      connected = false;
+      hubLink.searching = true;
+      hubLink.via = null;
+      handlers?.onState("reconnecting", "hub connection lost");
+      setTimeout(() => {
+        hubIp = `192.168.1.${30 + Math.floor(Math.random() * 200)}`;
+        hubLink.searching = false;
+        hubLink.via = via;
+        open(true);
+      }, ms);
+    },
     disconnect(ms = 4000) {
       connected = false;
       handlers?.onState("reconnecting", "hub connection lost");
@@ -277,14 +316,48 @@ export function mockTransport(daemonPort: number): Transport {
   }, 1000);
 
   let sinceFn: () => number | undefined = () => undefined;
+  // protocol v2 handshake, both sides in-process: the "hub" half here, the client half via ../auth.ts
+  // (the same functions realTransport uses). ?mockimpostor=1: wrong server_proof. ?mockwronghub=1: challenge
+  // from a different hub_id than the daemon's pin. Either way the UI must refuse and not retry.
+  const MOCK_TOKEN = "mock-shared-token";
+  let impostorSeen = false;
+  async function handshake(): Promise<{ ok: true; session: string } | { ok: false; detail: string }> {
+    const nonce = randomHex(32);
+    const hubId = params.get("mockwronghub") === "1" ? "deadbeef-0000-4000-8000-000000000000" : HUB_ID;
+    // client: check the pin before sending anything
+    if (hubId !== HUB_ID) return { ok: false, detail: `${IMPOSTOR_MSG}: hub id ${hubId.slice(0, 8)} is not the pinned ${HUB_ID.slice(0, 8)}` };
+    const cnonce = randomHex(32);
+    const proof = await clientProof(MOCK_TOKEN, nonce, hubId, me, "ui", cnonce);
+    // hub: verify the client's proof
+    if (!sameHex(proof, await clientProof(MOCK_TOKEN, nonce, hubId, me, "ui", cnonce))) return { ok: false, detail: "hub refused our proof" };
+    const sp = params.get("mockimpostor") === "1" ? randomHex(32) : await serverProof(MOCK_TOKEN, cnonce, nonce, hubId);
+    // client: verify the hub's proof before trusting anything
+    if (!sameHex(sp, await serverProof(MOCK_TOKEN, cnonce, nonce, hubId))) return { ok: false, detail: IMPOSTOR_MSG };
+    return { ok: true, session: randomHex(24) };
+  }
+  api.handshakes = 0;
+
   function open(re: boolean) {
     if (!handlers) return;
     const h = handlers;
     h.onState(re ? "reconnecting" : "connecting");
-    setTimeout(() => {
+    if (impostorSeen) {
+      h.onState("offline", `${IMPOSTOR_MSG} at ${hubUrl()}; not reconnecting there`);
+      return;
+    }
+    setTimeout(async () => {
+      api.handshakes++;
+      const hs = await handshake();
+      if (!hs.ok) {
+        impostorSeen = hs.detail.startsWith(IMPOSTOR_MSG);
+        h.onState("offline", impostorSeen ? `${hs.detail}; not reconnecting there` : hs.detail);
+        if (!impostorSeen) setTimeout(() => open(true), 2000);
+        return;
+      }
+      mockSession = hs.session;
       connected = true;
       h.onState("connected");
-      h.onFrame({ op: "welcome", hub_id: "mock-hub", hub_name: "mock hub", server_time: iso(), protocol: PROTOCOL_VERSION });
+      h.onFrame({ op: "welcome", hub_id: HUB_ID, hub_name: "mock hub", server_time: iso(), protocol: PROTOCOL_VERSION, server_proof: "verified-in-handshake", session: hs.session });
       h.onFrame(snapshot());
       const since = sinceFn();
       if (since != null) for (const f of log) if (f.seq > since) h.onFrame({ op: "event", frame: f });
@@ -298,7 +371,24 @@ export function mockTransport(daemonPort: number): Transport {
   return {
     mock: true,
     async bootstrap() {
-      return { user: me, hub_http: "http://mock-hub:7700", hub_ws: "ws://mock-hub:7700/ws", token: "mock", daemon: `http://127.0.0.1:${daemonPort}` };
+      return { user: me, hub_http: hubUrl(), hub_ws: hubUrl().replace("http", "ws") + "/ws", token: "mock", daemon: `http://127.0.0.1:${daemonPort}` };
+    },
+    async health() {
+      api.healthCalls++;
+      return {
+        ok: true as const,
+        user: me,
+        hub: {
+          state: hubLink.searching ? ("reconnecting" as const) : connected ? ("connected" as const) : ("connecting" as const),
+          url: hubLink.searching ? null : hubUrl(),
+          via: hubLink.via,
+          hub_name: "mock hub",
+          hub_id: HUB_ID,
+          searching: hubLink.searching,
+        },
+        outbox_depth: 0,
+        inbox_unhandled: 0,
+      };
     },
     connect(h, since) {
       // StrictMode may build two transports; the test hook belongs to the one that actually connects
@@ -306,6 +396,9 @@ export function mockTransport(daemonPort: number): Transport {
       handlers = h;
       sinceFn = since;
       open(false);
+      // ?mocksearch=<ms>: a searching phase 3s after connecting (the hub's IP changes), then found by scan
+      const ms = Number(params.get("mocksearch"));
+      if (ms > 0) setTimeout(() => api.search(ms), 3000);
       runScript();
       runChatter();
       return () => {
@@ -317,6 +410,8 @@ export function mockTransport(daemonPort: number): Transport {
     },
     async messages(q) {
       await new Promise((r) => setTimeout(r, 350));
+      // v2: hub REST needs the session from a verified welcome
+      if (!mockSession) throw new Error("not connected to the hub");
       return [...messages.values()]
         .filter((m) => involves(m, q.address) && (!q.with || involves(m, q.with)))
         .filter((m) => !q.before || m.timestamp < q.before)
@@ -329,6 +424,20 @@ export function mockTransport(daemonPort: number): Transport {
         hops: req.hops ?? 0, type: req.type, body: req.body, timestamp: iso(),
       };
       const m = sendMsg(env.from, env.to, env.type, env.body, env.reply_to);
+      // the boss: thinks for a few seconds (status flips to working), then answers with reply_to.
+      // ?mockboss=off: it never answers, so "waiting for the boss…" stays up.
+      if (req.to === `${me}/orchestrator` && env.from === `${me}/human`) {
+        if (params.get("mockboss") === "off") return { id: m.id, queued: true as const };
+        const boss = `${me}/orchestrator`;
+        setTimeout(() => touch(boss, { status: "working", task: "Reading your message" }), 500);
+        setTimeout(() => {
+          const ask = typeof req.body === "string" ? req.body : "that";
+          const short = ask.length > 60 ? `${ask.slice(0, 57)}…` : ask;
+          sendMsg(boss, `${me}/human`, "result", `On it: *${short}*\n\nI've split it up: **worker-1** takes the first part, **worker-3** checks it. I'll report back here when they're done.`, m.id);
+          touch(boss, { status: "working", task: `coordinating: ${short}` });
+        }, 2500 + Math.random() * 2000);
+        return { id: m.id, queued: true as const };
+      }
       // a local agent answers its human
       if (userOf(req.to) === me && req.to !== `${me}/human`) {
         setTimeout(() => {

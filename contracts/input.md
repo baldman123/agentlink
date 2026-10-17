@@ -3,6 +3,8 @@
 A command bar in the UI types into this laptop's own claude4 panes: one line of text into every checked pane, or
 `/clear` into all of them ("Reset chats"). It is the local person at the keyboard, so it is trusted. It never crosses
 the hub: no remote user, message, or screen can reach this channel, and the UI only offers it for its own user's agents.
+The one exception is cloud mode, where the owner types into their own panes from the website, through signed frames only
+(see "Cloud input" below).
 
 ## Flow
 
@@ -40,6 +42,24 @@ Log `{event:"input.typed", id, agent, result}`, never the text.
 ### `GET /v1/panes/input/:id`
 
 `{ id, state: "pending" | "done" | "failed", results? }`. Results are kept for 10 minutes.
+
+## Cloud input (website → your own panes; `cloud-api.md` "Typing into your own panes")
+
+In cloud mode the website is the owner's command bar too. The API sends the request as a broadcast on the private Realtime channel
+`input:<user>` (event `input`, payload `{ id, user, agents, text, submit, at, sig }`), and the daemon's cloud link hands it to the bridge
+through the same in-memory queue and SSE stream as a local `POST /v1/panes/input`. The bridge needs no change and can't tell them apart.
+This is the only path from the hub side to the panes; the LAN hub link has none.
+
+Before anything is typed, the daemon (`daemon/src/cloudinput.ts`) checks, and refuses with `input.cloud_refused {reason, id}`:
+- `sig` = hex HMAC-SHA256(key = sha256 hex of this daemon's own access code, msg = `"agentlink-input-v1\n" + user + "\n" + id + "\n" + at
+  + "\n" + agents.join(",") + "\n" + (submit ? "1" : "0") + "\n" + text`), compared in constant time → else `bad_sig`. Only the API (which
+  stores that hash) and this daemon know the key, so a wrong channel policy alone can't let another person type here;
+- `user` is this daemon's user → else `wrong_user`; `|now - at| ≤ 60s` → else `stale`; the `id` hasn't been seen in the last 10 minutes → else `replay`;
+- agents are 1..5 distinct names from `orchestrator`, `worker-1`..`worker-4` → else `bad_agents`; text is 1..4000 characters → else `bad_text`.
+
+An accepted frame is logged `input.cloud_accepted {id, local_id, agents, chars}` (never the text). No bridge connected → no typing, and
+the result is reported at once as `failed: no_bridge` for each pane. Otherwise, when the bridge reports (or the request times out), the
+daemon sends `POST /api/panes/input/:id/result { state: "done" | "failed", results }` with the same per-pane strings as above.
 
 ## UI
 

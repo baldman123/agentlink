@@ -12,12 +12,20 @@ if (!token) {
   console.error("agentlink hub: AGENTLINK_TOKEN is required");
   process.exit(1);
 }
+// The master token works only for this user (the person running the hub). Everyone else is invited
+// with `bin/agentlink-hub invite <user>` and gets a personal token.
+const owner = process.env.AGENTLINK_HUB_OWNER ?? "";
+if (!/^[a-z0-9_-]{1,32}$/.test(owner)) {
+  console.error("agentlink hub: AGENTLINK_HUB_OWNER is required (the hub owner's agentlink user, e.g. alex)");
+  process.exit(1);
+}
 
 const host = hostname().replace(/\.local$/, "");
 const hub = new Hub({
   port: Number(process.env.AGENTLINK_HUB_PORT ?? DEFAULT_PORTS.hub),
   host: process.env.AGENTLINK_HUB_HOST ?? "0.0.0.0",
   token,
+  owner,
   dbPath: process.env.AGENTLINK_HUB_DB ?? "./data/hub.sqlite",
   hubName: process.env.AGENTLINK_HUB_NAME ?? "", // filled in below once the port is known
 });
@@ -26,7 +34,7 @@ const port = await hub.listen();
 // One name everywhere: mDNS instance, TXT name, welcome/health hub_name.
 // The port suffix keeps two hubs on one machine from colliding.
 hub.opts.hubName ||= `agentlink-hub-${host}-${port}`;
-logInfo("hub.started", { port, hub_id: hub.hubId, hub_name: hub.opts.hubName, protocol: PROTOCOL_VERSION });
+logInfo("hub.started", { port, hub_id: hub.hubId, hub_name: hub.opts.hubName, protocol: PROTOCOL_VERSION, owner });
 
 let advertiser: Advertiser | null = null;
 if (process.env.AGENTLINK_MDNS !== "0") {

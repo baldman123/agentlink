@@ -24,7 +24,7 @@ Without it, the bridge sends no screens at all. The UI says which users share an
 
 ## Redaction (bridge, before sending)
 
-Replace with `[redacted]`: the shared token value; anything after `TOKEN=`, `SECRET=`, `PASSWORD=`, `API_KEY=`, `Authorization: Bearer `;
+Replace with `[redacted]`: this laptop's hub token value (master or personal); anything after `TOKEN=`, `SECRET=`, `PASSWORD=`, `API_KEY=`, `Authorization: Bearer `;
 and strings shaped like `sk-…` (20+), `ghp_…`, `github_pat_…`, `xox[abp]-…`, `AKIA[0-9A-Z]{16}`, `-----BEGIN … PRIVATE KEY-----` blocks.
 Redaction is best-effort; screen sharing is opt-in because of that.
 

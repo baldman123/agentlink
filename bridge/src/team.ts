@@ -1,5 +1,5 @@
 import type { SessionKind, SessionStatus } from "../../contracts/index.ts";
-import { BUSY_RE, PROMPT_RE, readRegistry, type Tmux } from "./tmux.ts";
+import { isBusy, PROMPT_RE, readRegistry, type Tmux } from "./tmux.ts";
 
 export interface SlotView {
   slot: number;
@@ -54,7 +54,7 @@ export async function readTeam(tmux: Tmux, stateDir: string): Promise<SlotView[]
 
 /** contracts/bridge.md: busy screen → working; @state blocked → error; asking or a yes/no prompt → waiting; else idle. */
 export function statusOf(s: SlotView): SessionStatus {
-  if (BUSY_RE.test(s.screen)) return "working";
+  if (isBusy(s.screen)) return "working";
   if (s.state === "blocked") return "error";
   if (s.state === "asking" || PROMPT_RE.test(s.screen)) return "waiting";
   return "idle";

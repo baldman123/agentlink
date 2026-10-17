@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Address, MessageType, StoredMessage } from "../../../contracts/index.ts";
 import { HUMAN_AGENT } from "../../../contracts/index.ts";
 import { clockTime, involves, userOf } from "../lib.ts";
@@ -44,9 +44,21 @@ export function useHistory(address: Address | null) {
   return { messages, status, loadEarlier };
 }
 
-export function MessageList({ address, compact, onReply }: { address: Address; compact?: boolean; onReply?(m: StoredMessage): void }) {
+export function MessageList({
+  address, compact, onReply, filter, noteFor, emptyText,
+}: {
+  address: Address;
+  compact?: boolean;
+  onReply?(m: StoredMessage): void;
+  /** Narrow the chat to some of its messages (the boss panel shows only you <-> your boss). */
+  filter?(m: StoredMessage): boolean;
+  /** Extra line under a message, e.g. "waiting for the boss…". */
+  noteFor?(m: StoredMessage): ReactNode;
+  emptyText?: string;
+}) {
   const { state } = useApp();
-  const { messages: all, status, loadEarlier } = useHistory(address);
+  const { messages: unfiltered, status, loadEarlier } = useHistory(address);
+  const all = useMemo(() => (filter ? unfiltered.filter(filter) : unfiltered), [unfiltered, filter]);
   // local-only history reset (Reset chats → "also clear chat history in this browser")
   const [showHidden, setShowHidden] = useState(false);
   const cutoff = state.historyCutoff;
@@ -92,7 +104,7 @@ export function MessageList({ address, compact, onReply }: { address: Address; c
       {(status === "ready" || status === "more") && messages.length === 0 && !hiddenCount && (
         <div className="empty">
           <strong>No messages yet.</strong>
-          <span>{compact ? "This session hasn't sent or received anything." : "Send a task or a note below to get things moving."}</span>
+          <span>{emptyText ?? (compact ? "This session hasn't sent or received anything." : "Send a task or a note below to get things moving.")}</span>
         </div>
       )}
       {cutoff && showHidden ? (
@@ -127,6 +139,7 @@ export function MessageList({ address, compact, onReply }: { address: Address; c
               compact={compact}
               onReply={onReply}
               replyTo={m.reply_to ? state.messages[m.reply_to] : undefined}
+              note={noteFor?.(m)}
             />
           );
         })
@@ -170,8 +183,34 @@ function SysFold({ run }: { run: StoredMessage[] }) {
 
 const TYPES: MessageType[] = ["chat", "task", "result"];
 
+/** Sending as <me>/human through the daemon (/v1/send), shared by the chat composer and the boss panel. */
+export function useSend() {
+  const { transport } = useApp();
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const send = useCallback(
+    async (req: { to: Address; type: MessageType; body: string; replyTo?: string | null }): Promise<boolean> => {
+      const body = req.body.trim();
+      if (!body) return false;
+      setBusy(true);
+      setErr("");
+      try {
+        await transport.send({ from_agent: HUMAN_AGENT, to: req.to, type: req.type, body, reply_to: req.replyTo ?? null });
+        return true;
+      } catch (e) {
+        setErr(`Not sent: ${(e as Error).message}. Your text is still here.`);
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [transport],
+  );
+  return { send, busy, err };
+}
+
 function Composer({ address, replyTo, clearReply }: { address: Address; replyTo: StoredMessage | null; clearReply(): void }) {
-  const { state, transport } = useApp();
+  const { state } = useApp();
   const me = state.me!;
   const own = myChats(state).filter((a) => a !== `${me}/${HUMAN_AGENT}`);
   // every remote orchestrator and worker, grouped by user
@@ -188,8 +227,7 @@ function Composer({ address, replyTo, clearReply }: { address: Address; replyTo:
   const [to, setTo] = useState<Address>(defaultTo);
   const [type, setType] = useState<MessageType>("chat");
   const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
+  const { send: sendReq, busy, err } = useSend();
   const ta = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => setTo(defaultTo), [defaultTo]);
@@ -206,20 +244,12 @@ function Composer({ address, replyTo, clearReply }: { address: Address; replyTo:
   const extra = listed.has(to) ? null : to;
 
   const send = async () => {
-    const body = text.trim();
-    if (!body || busy) return;
-    setBusy(true);
-    setErr("");
-    try {
-      await transport.send({ from_agent: HUMAN_AGENT, to, type, body, reply_to: replyTo?.id ?? null });
+    if (!text.trim() || busy) return;
+    if (await sendReq({ to, type, body: text, replyTo: replyTo?.id })) {
       setText("");
       clearReply();
-    } catch (e) {
-      setErr(`Not sent: ${(e as Error).message}. Your text is still here.`);
-    } finally {
-      setBusy(false);
-      ta.current?.focus();
     }
+    ta.current?.focus();
   };
 
   const isRemote = to === "*" || userOf(to) !== me;

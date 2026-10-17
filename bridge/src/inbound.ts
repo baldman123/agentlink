@@ -1,5 +1,6 @@
 import { appendFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { HUMAN_AGENT, type InboxItem } from "../../contracts/index.ts";
 import { renderPaste, shortId } from "../../orchestrator/src/paste.ts";
 import { bodyToText, isUntrusted } from "../../orchestrator/src/trust.ts";
@@ -12,10 +13,23 @@ import { sanitizeForPaste, sleep, type Tmux } from "./tmux.ts";
 
 const SKIP_TYPES = new Set(["context_update", "status"]); // shown in the UI; never pasted
 
-/** What the local person typed in the UI: their own words, so no REMOTE banner or fence. */
+/** The CLI by full path, so the reply command works from whatever folder the pane is in. */
+const binPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin", "agentlink");
+export const AGENTLINK_BIN = /[^\w./-]/.test(binPath) ? `'${binPath.replace(/'/g, `'\\''`)}'` : binPath;
+
+/**
+ * What the local person typed in the UI: their own words, so no REMOTE banner or fence. They read the answer
+ * in the app, not in the pane, so the footer says the answer must go back with `agentlink reply`.
+ */
 export function renderLocalHuman(item: InboxItem): string {
   const id8 = shortId(item.envelope.id);
-  return `[agentlink message from you (UI)]\n${bodyToText(item.envelope.body)}\nReply:   agentlink reply ${id8} "<text>"`;
+  return [
+    "[agentlink message from you (UI)]",
+    bodyToText(item.envelope.body),
+    "(Sent from the agentlink app. The person is reading there, not in this pane: an answer you only type here never reaches them.",
+    "Send your answer with this command; it works from any folder:)",
+    `Reply:   ${AGENTLINK_BIN} reply ${id8} "<your answer>"`,
+  ].join("\n");
 }
 
 /**
@@ -37,6 +51,7 @@ export class Inbound {
     private daemon: Daemon,
     private store: Store,
     private afterPaste: () => void,
+    private onLocalHumanPasted?: (item: InboxItem, slot: SlotView) => void,
   ) {}
 
   start(): void {
@@ -169,6 +184,7 @@ export class Inbound {
     this.store.mark(e.id, "pasted");
     logMsg("msg.pasted", e, { slot: slot.slot, pane: slot.pane, agent: slot.agent, remote: item.remote, local_human: localHuman });
     this.boardLine(item);
+    if (localHuman) this.onLocalHumanPasted?.(item, slot);
     this.afterPaste();
     return true;
   }

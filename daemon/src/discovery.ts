@@ -1,11 +1,12 @@
 import { EventEmitter } from "node:events";
+import type { NetworkInterfaceInfo } from "node:os";
 import { Bonjour, type Browser, type Service } from "bonjour-service";
 import { MDNS_SERVICE_TYPE } from "../../contracts/index.ts";
 import { log } from "./log.ts";
 
 export interface HubTarget {
   url: string; // http://host:port
-  via: "mdns" | "manual";
+  via: "mdns" | "last_known" | "scan" | "manual";
   name: string | null;
   hubId: string | null; // TXT hub_id for mDNS targets; unknown (null) for the manual URL
 }
@@ -115,6 +116,11 @@ export class Discovery extends EventEmitter {
     return manual;
   }
 
+  /** Discovered hubs whose TXT hub_id equals `pin`, newest first. (Still to be verified by /api/health.) */
+  matching(pin: string): HubTarget[] {
+    return [...this.found.values()].filter((t) => t.hubId === pin).reverse();
+  }
+
   private latest(pinnedId: string | null): HubTarget | null {
     let last: HubTarget | null = null;
     let pinned: HubTarget | null = null;
@@ -124,6 +130,30 @@ export class Discovery extends EventEmitter {
     }
     return pinned ?? last;
   }
+}
+
+const isPrivate = (a: number[]) =>
+  a[0] === 10 || (a[0] === 172 && a[1] >= 16 && a[1] <= 31) || (a[0] === 192 && a[1] === 168);
+
+/**
+ * Hosts to scan for the hub: every host of the /24 around each private IPv4 address in `ifaces`
+ * (shaped like os.networkInterfaces()). Internal, IPv6, link-local and public addresses are skipped;
+ * a wider private subnet (a /16 or /8) is still capped at the /24 around the address. Pure.
+ */
+export function scanHosts(ifaces: NodeJS.Dict<NetworkInterfaceInfo[]>): string[] {
+  const prefixes = new Set<string>();
+  for (const addrs of Object.values(ifaces)) {
+    for (const a of addrs ?? []) {
+      const fam = a.family as unknown; // "IPv4", or 4 on some Node versions
+      if (a.internal || (fam !== "IPv4" && fam !== 4)) continue;
+      const parts = a.address.split(".").map(Number);
+      if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) continue;
+      if (isPrivate(parts)) prefixes.add(parts.slice(0, 3).join("."));
+    }
+  }
+  const hosts: string[] = [];
+  for (const prefix of prefixes) for (let i = 1; i <= 254; i++) hosts.push(`${prefix}.${i}`);
+  return hosts;
 }
 
 function pickHost(svc: Service): string | null {

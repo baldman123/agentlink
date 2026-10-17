@@ -18,6 +18,9 @@ export interface BridgeConfig {
   backlogMs: number; // on the very first run, older unhandled inbox items are recorded, not pasted
   shareScreens: boolean; // AGENTLINK_SHARE_SCREENS=1 (contracts/screens.md); off by default
   screenMs: number; // capture interval per pane
+  answerFallback: boolean; // AGENTLINK_BRIDGE_ANSWER_FALLBACK=0 turns it off (contracts/bridge.md, "Answers to the UI")
+  answerWaitMs: number; // how long a pane may sit idle without an `agentlink reply` before the fallback is sent
+  answerCheckMs: number;
 }
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -59,5 +62,8 @@ export function loadConfig(env = process.env): BridgeConfig {
     backlogMs: Number(env.AGENTLINK_BRIDGE_BACKLOG_MS) || 10 * 60_000,
     shareScreens: env.AGENTLINK_SHARE_SCREENS === "1",
     screenMs: Number(env.AGENTLINK_SCREEN_MS) || 1_000,
+    answerFallback: env.AGENTLINK_BRIDGE_ANSWER_FALLBACK !== "0",
+    answerWaitMs: Number(env.AGENTLINK_BRIDGE_ANSWER_WAIT_MS) || 10 * 60_000,
+    answerCheckMs: Number(env.AGENTLINK_BRIDGE_ANSWER_CHECK_MS) || 15_000,
   };
 }

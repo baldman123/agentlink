@@ -4,7 +4,7 @@ import type { Daemon } from "./daemon.ts";
 import { log } from "./log.ts";
 import { cleanScreen, stripAll } from "./redact.ts";
 import type { SlotView } from "./team.ts";
-import { BUSY_RE, type Tmux } from "./tmux.ts";
+import { isBusy, type Tmux } from "./tmux.ts";
 
 const MIN_GAP_MS = 500; // at most 2 updates/s per pane
 const REFRESH_MS = 30_000; // resend an unchanged screen now and then (the daemon keeps only the latest, in memory)
@@ -71,7 +71,7 @@ export class ScreenShare {
     const [cols, rows] = size.out.trim().split(/\s+/).map(Number);
     const text = cleanScreen(raw.out, this.token);
     const visible = stripAll(raw.out).split("\n").slice(-(rows || 1) - 1).join("\n");
-    const busy = BUSY_RE.test(visible);
+    const busy = isBusy(visible);
     const changed = !prev || prev.text !== text || prev.cols !== cols || prev.rows !== rows || prev.busy !== busy;
     if (!changed && now - prev!.at < REFRESH_MS) return;
     const update: ScreenUpdate = { agent: s.agent, text, cols: cols || 80, rows: rows || 24, busy };

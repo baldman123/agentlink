@@ -70,6 +70,18 @@ record_pid() {
   mv "$tmp" "$PIDFILE"
 }
 
+# A non-owner's personal token: invited once through the hub's loopback admin API, then kept in $DIR.
+person_token() {
+  local f="$DIR/$1.token" out i
+  if [[ ! -s "$f" ]]; then
+    for i in $(seq 1 100); do curl -fsS "http://127.0.0.1:$BASE/api/health" >/dev/null 2>&1 && break; sleep 0.2; done
+    out="$(curl -fsS -X POST -H "Authorization: Admin $TOKEN" -H 'Content-Type: application/json' \
+      -d "{\"user\":\"$1\"}" "http://127.0.0.1:$BASE/api/admin/people")" || { echo "could not invite $1 at the hub on $BASE" >&2; exit 1; }
+    (umask 077 && sed -n 's/.*"token":"\([0-9a-f]*\)".*/\1/p' <<< "$out" > "$f")
+  fi
+  cat "$f"
+}
+
 start() {
   local name="$1" port pid
   port="$(port_of "$name")"
@@ -85,12 +97,14 @@ start() {
   # which is what demo-down.sh and the e2e kill -9 step signal.
   if [[ "$name" == hub ]]; then
     (cd "$ROOT/hub" && exec env -u AGENTLINK_HUB_URL \
-      AGENTLINK_TOKEN="$TOKEN" AGENTLINK_HUB_PORT="$port" AGENTLINK_HUB_NAME="$HUB_NAME" \
+      AGENTLINK_TOKEN="$TOKEN" AGENTLINK_HUB_OWNER=alex AGENTLINK_HUB_PORT="$port" AGENTLINK_HUB_NAME="$HUB_NAME" \
       AGENTLINK_HUB_DB="$DIR/hub.sqlite" AGENTLINK_HUB_LOG="$DIR/logs/hub.log" \
       nohup node --import "$TSX_LOADER" src/index.ts) >> "$DIR/logs/hub.out" 2>&1 &
   else
+    local tok="$TOKEN" # alex owns the hub and uses the master token; sam needs a personal one
+    [[ "$name" == alex ]] || tok="$(person_token "$name")"
     (cd "$DIR" && exec env -u AGENTLINK_HUB_URL -u AGENTLINK_DISCOVERY \
-      AGENTLINK_USER="$name" AGENTLINK_TOKEN="$TOKEN" AGENTLINK_DAEMON_PORT="$port" \
+      AGENTLINK_USER="$name" AGENTLINK_TOKEN="$tok" AGENTLINK_DAEMON_PORT="$port" \
       AGENTLINK_HUB_NAME="$HUB_NAME" AGENTLINK_DAEMON_DB="$DIR/daemon-$name.sqlite" \
       nohup node --import "$TSX_LOADER" "$ROOT/daemon/src/index.ts") >> "$DIR/logs/$name.out" 2>&1 &
   fi

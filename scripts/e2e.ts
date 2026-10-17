@@ -6,12 +6,12 @@
 // Prints PASS/FAIL per check and exits non-zero on any failure. Leaves the demo running (check 6
 // restarts sam through demo-up.sh, so the pidfile stays accurate for demo-down.sh).
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import WebSocket from "ws";
-import type { DaemonHealth, EventFrame, HubEvent, InboxItem, ServerFrame, UiBootstrap } from "../contracts/index.ts";
+import { PROTOCOL_VERSION, type DaemonHealth, type EventFrame, type HubEvent, type InboxItem, type ServerFrame, type UiBootstrap } from "../contracts/index.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const BASE = Number(process.env.AGENTLINK_BASE_PORT ?? 7700);
@@ -134,17 +134,26 @@ class UiSocket {
   events: EventFrame[] = [];
   private ws!: WebSocket;
 
-  async open(token: string) {
+  /** `user` must be the owner of `token`: the hub accepts the master token only for its owner (alex in the demo). */
+  async open(token: string, user: string) {
     this.ws = new WebSocket(`ws://127.0.0.1:${PORT.hub}/ws`);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("ui socket: no welcome within 5s")), 5000);
-      this.ws.on("open", () =>
-        this.ws.send(JSON.stringify({ op: "hello", token, role: "ui", user: "e2e-ui", protocol: 1 })),
-      );
+      // protocol v2 (hub-api.md "Auth"): answer the challenge with an HMAC proof; the token never goes out
+      const cnonce = randomBytes(32).toString("hex");
+      const hmac = (msg: string) => createHmac("sha256", token).update(msg).digest("hex");
+      let nonce = "";
+      let hubId = "";
       this.ws.on("message", (raw) => {
         const f = JSON.parse(raw.toString()) as ServerFrame;
-        if (f.op === "welcome") {
+        if (f.op === "challenge") {
+          nonce = f.nonce;
+          hubId = f.hub_id;
+          const proof = hmac(`agentlink-v2|c|${nonce}|${hubId}|${user}|ui|${cnonce}`);
+          this.ws.send(JSON.stringify({ op: "hello", role: "ui", user, protocol: PROTOCOL_VERSION, cnonce, proof }));
+        } else if (f.op === "welcome") {
           clearTimeout(timer);
+          if (f.server_proof !== hmac(`agentlink-v2|s|${cnonce}|${nonce}|${hubId}`)) return reject(new Error("ui socket: bad server_proof"));
           resolve();
         } else if (f.op === "event") this.events.push(f.frame);
       });
@@ -180,7 +189,7 @@ async function main() {
       check(`${u}: connected to this demo's hub on port ${PORT.hub}`, h.hub.url?.endsWith(`:${PORT.hub}`) === true, h.hub);
     }
     const boot = (await api("alex", "GET", "/v1/ui-bootstrap")).body as UiBootstrap;
-    await ui.open(boot.token);
+    await ui.open(boot.token, boot.user);
     check("ui socket (role ui) opened with the ui-bootstrap token", true);
     for (const u of ["alex", "sam"] as const) {
       const r = await api(u, "PUT", "/v1/sessions/orchestrator", { kind: "orchestrator", status: "idle", task: "" });
@@ -324,7 +333,12 @@ async function main() {
       timeout: 30_000,
     });
     const h = await health("sam");
-    check("sam restarted via demo-up.sh sam and reconnected over mDNS", h.hub.state === "connected" && h.hub.via === "mdns", h.hub);
+    // a restarted daemon may reconnect through its last known address before mDNS has answered
+    check(
+      `sam restarted via demo-up.sh sam and reconnected (via ${h.hub.via})`,
+      h.hub.state === "connected" && (h.hub.via === "mdns" || h.hub.via === "last_known"),
+      h.hub,
+    );
     const item = await until("queued message at sam", async () => (await inbox("sam", "orchestrator")).find((i) => i.envelope.id === id), 20_000);
     check("sam: message sent while it was down has arrived", item.envelope.from === "alex/orchestrator", item.envelope);
   });

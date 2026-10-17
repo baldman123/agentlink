@@ -1,8 +1,14 @@
 // Minimal stand-in for the real hub, for daemon testing only. In-memory; implements just enough of
-// contracts/hub-api.md: hello/welcome/snapshot, send -> accepted/rejected, routing with hops+1,
-// pending delivery for offline users, ack, heartbeat/ping, and a few REST endpoints.
+// contracts/hub-api.md: v2 challenge/hello/welcome (HMAC proofs, REST session), snapshot, send ->
+// accepted/rejected, routing with hops+1, pending delivery for offline users, ack, heartbeat/ping,
+// and a few REST endpoints.
 // Usage: AGENTLINK_TOKEN=x FAKE_HUB_PORT=7790 tsx test/fake-hub.ts
+// Impostor knobs for tests:
+//   FAKE_HUB_HEALTH_ID   /api/health reports this id (e.g. a copied pin) while the challenge tells the truth
+//   FAKE_HUB_ACCEPT_ANY=1 accept any hello proof (a host that copied hub_id but doesn't know the token;
+//                         run it with a different AGENTLINK_TOKEN and its server_proof can't verify)
 import http from "node:http";
+import { createHmac, randomBytes } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
   ADDRESS_RE,
@@ -17,7 +23,15 @@ import {
 const token = process.env.AGENTLINK_TOKEN ?? "";
 const port = Number(process.env.FAKE_HUB_PORT ?? 7790);
 const HUB_ID = process.env.FAKE_HUB_ID ?? "fake";
+const HEALTH_ID = process.env.FAKE_HUB_HEALTH_ID ?? HUB_ID;
+const ACCEPT_ANY = process.env.FAKE_HUB_ACCEPT_ANY === "1";
 if (!token) throw new Error("AGENTLINK_TOKEN required");
+const hmac = (msg: string) => createHmac("sha256", token).update(msg).digest("hex");
+const restSessions = new Map<string, { open: boolean; closedAt: number }>(); // REST bearer -> its socket's state
+const sessionValid = (s: string) => {
+  const r = restSessions.get(s);
+  return !!r && (r.open || Date.now() - r.closedAt < 60_000);
+};
 
 const daemons = new Map<string, WebSocket>();
 const seen = new Set<string>();
@@ -40,8 +54,10 @@ function deliver(user: string, env: Envelope) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
-  if (url.pathname === "/api/health") return res.end(JSON.stringify({ ok: true, hub_id: HUB_ID, hub_name: "fake-hub", protocol: 1 }));
-  if (req.headers.authorization !== `Bearer ${token}`) {
+  if (url.pathname === "/api/health") return res.end(JSON.stringify({ ok: true, hub_id: HEALTH_ID, hub_name: "fake-hub", protocol: PROTOCOL_VERSION }));
+  const auth = req.headers.authorization ?? "";
+  if (auth === `Bearer ${token}`) flog("rest.raw_token", {}); // v2 clients must never do this; tests assert it
+  if (!auth.startsWith("Bearer ") || !sessionValid(auth.slice(7))) {
     res.writeHead(401).end(JSON.stringify({ error: "unauthorized" }));
     return;
   }
@@ -77,13 +93,25 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server, path: "/ws" });
 wss.on("connection", (ws) => {
+  flog("ws.connection", {}); // instrumentation: tests assert a decoy hub never gets a socket at all
   let user: string | null = null;
+  let session: string | null = null;
+  const nonce = randomBytes(32).toString("hex");
+  out(ws, { op: "challenge", nonce, hub_id: HUB_ID, hub_name: "fake-hub", protocol: PROTOCOL_VERSION });
   const helloTimer = setTimeout(() => ws.close(4001, "no hello"), 5000);
   ws.on("message", (raw) => {
     const f = JSON.parse(raw.toString()) as ClientFrame;
     if (!user) {
-      if (f.op !== "hello" || f.token !== token) {
-        out(ws, { op: "error", code: "auth_failed", message: "bad token" });
+      // every first frame is logged (tests assert impostors never get one)
+      flog("first_frame", { op: f.op, has_token_field: "token" in (f as object), raw_token_sent: raw.toString().includes(token) });
+      if (f.op !== "hello" || "token" in (f as object) || f.protocol !== PROTOCOL_VERSION) {
+        out(ws, { op: "error", code: "auth_failed", message: "v2 hello required" });
+        ws.close(f.op === "hello" && f.protocol !== PROTOCOL_VERSION ? 4002 : 4001, "auth failed");
+        return;
+      }
+      const good = f.proof === hmac(`agentlink-v2|c|${nonce}|${HUB_ID}|${f.user}|${f.role}|${f.cnonce}`);
+      if (!good && !ACCEPT_ANY) {
+        out(ws, { op: "error", code: "auth_failed", message: "bad proof" });
         ws.close(4001, "auth failed");
         return;
       }
@@ -91,8 +119,11 @@ wss.on("connection", (ws) => {
       user = f.user;
       daemons.get(user)?.close(4003, "replaced");
       daemons.set(user, ws);
-      flog("hello", { user, since_seq: f.since_seq });
-      out(ws, { op: "welcome", hub_id: HUB_ID, hub_name: "fake-hub", server_time: new Date().toISOString(), protocol: PROTOCOL_VERSION });
+      session = randomBytes(24).toString("hex");
+      restSessions.set(session, { open: true, closedAt: 0 });
+      flog("hello", { user, since_seq: f.since_seq, proof_ok: good });
+      const server_proof = hmac(`agentlink-v2|s|${f.cnonce}|${nonce}|${HUB_ID}`);
+      out(ws, { op: "welcome", hub_id: HUB_ID, hub_name: "fake-hub", server_time: new Date().toISOString(), protocol: PROTOCOL_VERSION, server_proof, session });
       out(ws, { op: "snapshot", users: [], context: [...context.values()], last_seq: seq });
       for (const env of pending.get(user) ?? []) out(ws, { op: "deliver", envelope: env });
       return;
@@ -146,6 +177,7 @@ wss.on("connection", (ws) => {
   });
   ws.on("close", () => {
     clearTimeout(helloTimer);
+    if (session) restSessions.set(session, { open: false, closedAt: Date.now() });
     if (user && daemons.get(user) === ws) daemons.delete(user);
   });
 });

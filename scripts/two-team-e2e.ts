@@ -9,7 +9,7 @@
 // Step 6 covers live screens (contracts/screens.md): alex shares, sam doesn't, read through a
 // ui-role hub socket the way the web UI reads them.
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -24,7 +24,9 @@ const HUB = BASE;
 const PORT = { alex: BASE + 1, sam: BASE + 2 } as const;
 type User = keyof typeof PORT;
 const USERS: User[] = ["alex", "sam"];
-const TOKEN = randomBytes(16).toString("hex");
+const TOKEN = randomBytes(16).toString("hex"); // the hub's master token: alex (the host) only
+// sam's personal token, from `bin/agentlink-hub invite sam` on alex's side during setup
+const tokens: Record<User, string> = { alex: TOKEN, sam: "" };
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "agentlink-two-team-"));
 const dataDir = (u: User) => path.join(TMP, u);
 const session = (u: User) => `c4e2e-${u}`;
@@ -106,7 +108,7 @@ async function teamUp(u: User, extra: string[] = [], extraEnv: Record<string, st
       env: {
         ...process.env,
         AGENTLINK_DATA_DIR: dataDir(u),
-        AGENTLINK_TOKEN: TOKEN,
+        AGENTLINK_TOKEN: tokens[u],
         C4_TMUX_SOCKET: SOCKET,
         C4_STATE_DIR: c4Dir(u),
         ...extraEnv,
@@ -142,10 +144,14 @@ async function uiSocket(subscribe: string[] | "*") {
     ws.addEventListener("open", () => resolve(), { once: true });
     ws.addEventListener("error", () => reject(new Error("ui socket failed to open")), { once: true });
   });
-  ws.send(JSON.stringify({ op: "hello", token: TOKEN, role: "ui", user: "alex", protocol: PROTOCOL_VERSION }));
-  await until("ui welcome", async () => frames.some((f) => f.frame.op === "welcome"), 5_000);
+  // Protocol v2: answer the challenge with an HMAC proof. alex owns the hub, so the master token is alex's key.
+  const ch = await until("challenge", async () => frames.find((f) => f.frame.op === "challenge")?.frame as Extract<ServerFrame, { op: "challenge" }> | undefined, 5_000);
+  const cnonce = randomBytes(32).toString("hex");
+  const proof = createHmac("sha256", TOKEN).update(`agentlink-v2|c|${ch.nonce}|${ch.hub_id}|alex|ui|${cnonce}`).digest("hex");
+  ws.send(JSON.stringify({ op: "hello", role: "ui", user: "alex", protocol: PROTOCOL_VERSION, cnonce, proof }));
+  const welcome = await until("ui welcome", async () => frames.find((f) => f.frame.op === "welcome")?.frame as Extract<ServerFrame, { op: "welcome" }> | undefined, 5_000);
   ws.send(JSON.stringify({ op: "screens.subscribe", addresses: subscribe }));
-  return { ws, frames, close: () => ws.close() };
+  return { ws, frames, session: welcome.session, close: () => ws.close() };
 }
 // Command bar (contracts/input.md). The contract has no shared types; these are its shapes as written.
 type InputRequest = { agents: string[]; text: string; submit?: boolean };
@@ -259,7 +265,16 @@ async function main() {
     for (const u of USERS) await makeFakeTeam(u);
     check("two tmux sessions with 5 cat panes each, registries written", true);
     // alex keeps team-up's default UI origin; sam gets a custom one, to show AGENTLINK_UI_ORIGIN passes through.
-    const summary = { alex: await teamUp("alex"), sam: await teamUp("sam", [], { AGENTLINK_UI_ORIGIN: UI_ORIGIN.sam }) };
+    const alexSummary = await teamUp("alex");
+    check("host summary says how to invite people, and shows no token", alexSummary.includes("bin/agentlink-hub invite <name>") && !alexSummary.includes(TOKEN), alexSummary);
+    // The host invites sam: the CLI reads the master token from alex's data dir and talks to the hub on loopback.
+    const hubCli = (...a: string[]) => run(path.join(ROOT, "bin", "agentlink-hub"), a, { env: { ...process.env, AGENTLINK_DATA_DIR: dataDir("alex"), AGENTLINK_TOKEN: "" } });
+    const inv = (await hubCli("invite", "sam")).stdout;
+    tokens.sam = inv.match(/^\s*token\s+([0-9a-f]{64})\s*$/m)?.[1] ?? "";
+    check("agentlink-hub invite prints a personal token and the join command", tokens.sam !== "" && tokens.sam !== TOKEN && inv.includes("scripts/team-up.sh --user sam --join "), inv);
+    const listed = (await hubCli("list")).stdout;
+    check("agentlink-hub list shows sam invited, and no token", /sam\s+invited, not connected/.test(listed) && !listed.includes(tokens.sam) && !listed.includes(TOKEN), listed);
+    const summary = { alex: alexSummary, sam: await teamUp("sam", [], { AGENTLINK_UI_ORIGIN: UI_ORIGIN.sam }) };
     for (const u of USERS) {
       check(`${u}: summary says screens are not shared (no --share-screens)`, summary[u].includes("screens    not shared"), summary[u]);
       check(`${u}: local.env records AGENTLINK_SHARE_SCREENS=0`, localEnv(u).includes("AGENTLINK_SHARE_SCREENS=0"));
@@ -268,7 +283,7 @@ async function main() {
       const h = (await api(u, "GET", "/v1/health")).body;
       check(`${u}: daemon connected to the hub`, h.hub.state === "connected", h.hub);
       const env = fs.readFileSync(path.join(dataDir(u), "local.env"), "utf8");
-      check(`${u}: local.env has user and port, no token`, env.includes(`AGENTLINK_USER=${u}`) && env.includes(`AGENTLINK_DAEMON_PORT=${PORT[u]}`) && !env.includes(TOKEN));
+      check(`${u}: local.env has user and port, no token`, env.includes(`AGENTLINK_USER=${u}`) && env.includes(`AGENTLINK_DAEMON_PORT=${PORT[u]}`) && !env.includes(TOKEN) && !env.includes(tokens.sam));
       const mode = fs.statSync(path.join(dataDir(u), ".token")).mode & 0o777;
       check(`${u}: data/.token is private (${mode.toString(8)})`, mode === 0o600);
     }
@@ -429,7 +444,7 @@ async function main() {
       check("sam: no screen frames at a '*' subscriber after 4s", samFrames.length === 0, samFrames.map((f) => f.frame));
       const alexAddrs = new Set(all.frames.flatMap((f) => (f.frame.op === "screen" ? [f.frame.address] : [])));
       check("alex: all 5 panes stream to a '*' subscriber", ["orchestrator", "worker-1", "worker-2", "worker-3", "worker-4"].every((a) => alexAddrs.has(`alex/${a}`)), [...alexAddrs]);
-      const listed = await fetch(`http://127.0.0.1:${HUB}/api/screens`, { headers: { authorization: `Bearer ${TOKEN}` } });
+      const listed = await fetch(`http://127.0.0.1:${HUB}/api/screens`, { headers: { authorization: `Bearer ${ui.session}` } });
       const infos = ((await listed.json()) as { screens: ScreenInfo[] }).screens;
       check("GET /api/screens lists alex's panes and none of sam's", infos.some((s) => s.address === "alex/worker-1") && !infos.some((s) => s.address.startsWith("sam/")), infos);
       check("GET /api/screens carries no text", infos.every((s) => !("text" in s)), infos[0]);

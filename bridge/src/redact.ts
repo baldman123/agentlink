@@ -82,8 +82,33 @@ export function capScreen(text: string, maxLines = SCREEN_MAX_LINES, maxBytes = 
   return out;
 }
 
+const BLANK_RE = /^(?:\s|\u001b\[[0-9;]*m)*$/;
+
+/**
+ * Each run of blank lines becomes one blank line that keeps the run's colour codes. A tall pane (claude4web's are
+ * 240 rows) running Claude Code is mostly blank rows between the conversation and the input box, so without this
+ * the last SCREEN_MAX_LINES lines would be blank rows and the prompt, and none of the conversation.
+ */
+export function collapseBlankRuns(text: string): string {
+  const out: string[] = [];
+  let run: string[] = [];
+  const flush = () => {
+    if (run.length) out.push(run.length === 1 ? run[0] : run.join("").replace(/[^\u001b[0-9;m]/g, ""));
+    run = [];
+  };
+  for (const line of text.split("\n")) {
+    if (BLANK_RE.test(line)) run.push(line);
+    else {
+      flush();
+      out.push(line);
+    }
+  }
+  flush();
+  return out.join("\n");
+}
+
 /** The whole pipeline for one capture. */
 export function cleanScreen(raw: string, token?: string | null): string {
   const text = stripToSgr(raw).replace(/\n+$/, "");
-  return capScreen(redact(text, token));
+  return capScreen(collapseBlankRuns(redact(text, token)));
 }

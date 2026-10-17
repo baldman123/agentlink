@@ -1,12 +1,62 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Address } from "../../../contracts/index.ts";
 import { HUMAN_AGENT } from "../../../contracts/index.ts";
-import { agentOf, DAEMON_PORT, relTime } from "../lib.ts";
+import { agentOf, DAEMON_PORT, HUB_VIA_LABEL, relTime, shortId } from "../lib.ts";
+import { IMPOSTOR_MSG } from "../auth.ts";
 import type { Activity } from "../store.ts";
 import { findSession, myChats } from "../store.ts";
 import { Addr, StatusDot, useApp, useNow } from "./bits.tsx";
 
 const CONN_LABEL = { connected: "Connected", connecting: "Connecting", reconnecting: "Reconnecting", offline: "Offline" } as const;
+
+/** Header connection pill: UI socket state, plus the daemon's discovery view (via, pinned hub id, searching). */
+function ConnIndicator({ host }: { host: string | null }) {
+  const { state } = useApp();
+  const dh = state.daemonHub;
+  const id = dh?.hub_id ?? state.hubId;
+  const sid = shortId(id);
+  const via = dh?.via ? HUB_VIA_LABEL[dh.via] : null;
+  // the daemon lost its hub and is looking for the pinned one (mDNS → last address → scan → manual)
+  const searching = !!dh?.searching && state.conn !== "connected";
+  const name = state.hubName ?? dh?.hub_name ?? "hub";
+  const tip = [
+    searching ? `The daemon is looking for hub ${sid || "(not pinned yet)"} on this network. It only connects to that hub id, whatever its address.` : null,
+    !searching && state.conn === "connected" ? `Hub ${name}${sid ? ` · id ${sid}…` : ""}` : null,
+    !searching && via && dh?.url ? `Found via ${via} at ${dh.url}` : null,
+    state.connDetail && !searching ? state.connDetail : null,
+  ].filter(Boolean).join("\n");
+
+  if (state.conn !== "connected" && state.connDetail.startsWith(IMPOSTOR_MSG)) {
+    // a host answered as our hub but couldn't prove it knows the token (or has the wrong hub id)
+    return (
+      <div className="conn conn-impostor" role="alert" title={`${state.connDetail}\nThe UI will not connect to that address again until you reload.`}>
+        <span className="conn-dot" />
+        <span className="conn-label">{IMPOSTOR_MSG}</span>
+        <span className="conn-host">{state.connDetail.slice(IMPOSTOR_MSG.length).replace(/^[:;,]\s*/, "") || "not reconnecting there"}</span>
+      </div>
+    );
+  }
+  if (searching) {
+    return (
+      <div className="conn conn-searching" role="status" title={tip}>
+        <span className="conn-radar" aria-hidden />
+        <span className="conn-label">Searching for hub{sid ? <> <span className="hubid">{sid}</span></> : ""}…</span>
+        <span className="conn-host">its address changed; looking on this network</span>
+      </div>
+    );
+  }
+  return (
+    <div className={`conn conn-${state.conn}`} role="status" title={tip || undefined}>
+      <span className="conn-dot" />
+      <span className="conn-label">{CONN_LABEL[state.conn]}</span>
+      <span className="conn-host">
+        {state.conn === "offline" && state.connDetail ? state.connDetail : host ? `${name} · ${host}` : "no hub yet"}
+      </span>
+      {state.conn === "connected" && via && <span className="conn-via">{via}</span>}
+      {sid && <span className="hubchip" aria-label={`hub id ${sid}`}>#{sid}</span>}
+    </div>
+  );
+}
 
 export function Header({ theme, toggleTheme }: { theme: string; toggleTheme(): void }) {
   const { state, transport } = useApp();
@@ -27,11 +77,7 @@ export function Header({ theme, toggleTheme }: { theme: string; toggleTheme(): v
         <span className="muted"> · daemon :{DAEMON_PORT}</span>
       </div>
       <span className="grow" />
-      <div className={`conn conn-${state.conn}`} role="status" title={state.connDetail || undefined}>
-        <span className="conn-dot" />
-        <span className="conn-label">{CONN_LABEL[state.conn]}</span>
-        <span className="conn-host">{state.conn === "offline" && state.connDetail ? state.connDetail : host ? `${state.hubName ?? "hub"} · ${host}` : "no hub yet"}</span>
-      </div>
+      <ConnIndicator host={host} />
       <button className="btn btn-ghost icon" onClick={toggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`} title="Toggle theme">
         {theme === "dark" ? (
           <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden><circle cx="8" cy="8" r="3.2" fill="currentColor" /><g stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">{[0, 45, 90, 135, 180, 225, 270, 315].map((d) => <line key={d} x1="8" y1="1.6" x2="8" y2="3" transform={`rotate(${d} 8 8)`} />)}</g></svg>

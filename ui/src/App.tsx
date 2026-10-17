@@ -30,10 +30,11 @@ export function App() {
   useEffect(() => saveStorage("al.leftW", leftW), [leftW]);
   useEffect(() => saveStorage("al.rightW", rightW), [rightW]);
 
-  const [tab, setTab] = useState<Tab>("sessions");
+  const [tab, setTab] = useState<Tab>("boss"); // the boss panel is what you see first
   const [feed, setFeed] = useState<Address | null>(null);
   const [contextFocus, setContextFocus] = useState<AppCtx["contextFocus"]>(null);
   const [switcher, setSwitcher] = useState(false);
+  const [termFocus, setTermFocus] = useState<AppCtx["termFocus"]>(null);
   const [view, setView] = useState<AppCtx["view"]>(() => {
     const ok = (v: unknown): v is AppCtx["view"] => v === "chat" || v === "team" || v === "terminals";
     const q = params.get("view");
@@ -74,8 +75,22 @@ export function App() {
 
   // the daemon may only learn its user/hub after a retry; refresh boot info on connect
   useEffect(() => {
-    if (state.conn === "connected" && !transport.mock)
+    if (state.conn === "connected") // the hub may be at a new address after a search
       transport.bootstrap().then((b) => dispatch({ type: "boot", me: b.user, hubUrl: b.hub_http })).catch(() => {});
+  }, [state.conn, transport]);
+
+  // the daemon's hub link (how it was found, pinned hub_id, searching): read once per connect, and
+  // every 3s only while the hub socket is down (the one allowed poll; everything else is events)
+  useEffect(() => {
+    let alive = true;
+    const read = () => transport.health().then((h) => alive && dispatch({ type: "health", hub: h?.hub ?? null }));
+    read();
+    if (state.conn === "connected") return () => { alive = false; };
+    const t = setInterval(read, 3000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
   }, [state.conn, transport]);
 
   useEffect(() => {
@@ -99,6 +114,11 @@ export function App() {
     [state.me],
   );
 
+  const openTerminal = useCallback((address: Address) => {
+    setTermFocus({ address, at: Date.now() });
+    setView("terminals");
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -110,7 +130,7 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const ctx: AppCtx = { state, dispatch, transport, openContext, openFeed, contextFocus, view, setView };
+  const ctx: AppCtx = { state, dispatch, transport, openContext, openFeed, contextFocus, view, setView, openTerminal, termFocus };
 
   return (
     <Ctx.Provider value={ctx}>

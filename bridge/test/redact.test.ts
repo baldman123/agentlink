@@ -83,5 +83,17 @@ check(Buffer.byteLength(huge, "utf8") <= SCREEN_MAX_BYTES, "a single over-long l
 const late = cleanScreen(`${KEY.split("\n")[0]}\n${"pad\n".repeat(400)}tail`, null);
 check(!late.includes("pad") || late.includes(REDACTED), "redaction runs before the cap (a cut key block can't leak)");
 
+console.error("tall panes");
+// A 240-row pane running Claude Code: the conversation at the top, ~200 blank rows, the input box at the bottom.
+// Keeping only the last SCREEN_MAX_LINES lines would send blank rows and the prompt box, and none of the conversation.
+const convo = Array.from({ length: 30 }, (_, i) => `${E}[38;5;246mreply ${i}${E}[39m`);
+const tall = [...convo, ...Array.from({ length: 200 }, (_, i) => (i === 50 ? `${E}[0m   ` : "")), "✳ Working… (12s)", "────", "❯ ", "────"].join("\n");
+const tallOut = cleanScreen(tall, null);
+const tallPlain = stripAll(tallOut).split("\n");
+check(tallPlain.some((l) => l === "reply 0") && tallPlain.some((l) => l === "reply 29") && tallOut.endsWith("────"), "a tall pane keeps its conversation and its input box", tallPlain.slice(0, 5));
+check(!/\n\s*\n\s*\n/.test(stripAll(tallOut)), "a run of blank rows becomes one blank line");
+check(tallOut.includes(`${E}[0m`), "colour codes on the dropped blank rows are kept");
+check(stripAll(cleanScreen("a\n\nb", null)) === "a\n\nb", "a single blank line is left alone");
+
 console.error(`\n${passes} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

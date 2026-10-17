@@ -18,6 +18,7 @@ const sharingUsers = new Set<string>(); // users we've received at least one scr
 const notSharingUsers = new Set<string>(); // users whose subscribed screens never arrived
 const listeners = new Set<() => void>();
 let version = 0;
+let graceMs = NOT_SHARED_AFTER_MS;
 
 function emit() {
   version++;
@@ -25,6 +26,10 @@ function emit() {
 }
 
 export const screenStore = {
+  /** A slower source (the cloud sends a pane's first screen up to ~3s after someone starts watching) waits longer. */
+  setGrace(ms: number) {
+    graceMs = ms;
+  },
   put(address: Address, screen: ScreenUpdate, at: string) {
     screens.set(address, { screen, at });
     sharingUsers.add(userOf(address));
@@ -42,13 +47,13 @@ export const screenStore = {
     for (const a of [...subscribedAt.keys()]) if (!keep.has(a)) subscribedAt.delete(a);
     emit();
     // re-render once the "not shared" grace period has passed
-    setTimeout(emit, NOT_SHARED_AFTER_MS + 50);
+    setTimeout(emit, graceMs + 50);
   },
   /** After a reconnect the hub re-sends current screens; restart the grace period. */
   resetGrace() {
     const now = Date.now();
     for (const a of subscribedAt.keys()) subscribedAt.set(a, now);
-    setTimeout(emit, NOT_SHARED_AFTER_MS + 50);
+    setTimeout(emit, graceMs + 50);
   },
   get: (a: Address) => screens.get(a),
   sharing: (user: string) => sharingUsers.has(user),
@@ -58,7 +63,7 @@ export const screenStore = {
     if (notSharingUsers.has(user)) return "no";
     const now = Date.now();
     for (const [a, t] of subscribedAt)
-      if (userOf(a) === user && now - t >= NOT_SHARED_AFTER_MS) {
+      if (userOf(a) === user && now - t >= graceMs) {
         notSharingUsers.add(user); // remembered after we stop subscribing; cleared if a screen ever arrives
         return "no";
       }
@@ -68,7 +73,7 @@ export const screenStore = {
   availability(a: Address): "live" | "waiting" | "not_shared" {
     if (screens.has(a)) return "live";
     const t = subscribedAt.get(a);
-    if (t != null && Date.now() - t < NOT_SHARED_AFTER_MS) return "waiting";
+    if (t != null && Date.now() - t < graceMs) return "waiting";
     return "not_shared";
   },
 };

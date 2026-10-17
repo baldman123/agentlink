@@ -2,6 +2,7 @@ import type {
   Address,
   ContextEntry,
   ContextWrite,
+  DaemonHealth,
   RichBody,
   SendRequest,
   SendResponse,
@@ -60,7 +61,17 @@ export interface Transport {
   /** Types into this laptop's own panes via the daemon + bridge (trusted local input; never crosses the hub). */
   paneInput(req: PaneInputRequest): Promise<PaneInputResponse>;
   paneInputStatus(id: string): Promise<PaneInputStatus | null>;
+  /** GET /v1/health on the daemon: how it found the hub, the pinned hub_id, and whether it is searching. */
+  health(): Promise<DaemonHealth | null>;
 }
+
+export const HUB_VIA_LABEL: Record<NonNullable<DaemonHealth["hub"]["via"]>, string> = {
+  mdns: "mDNS",
+  last_known: "last address",
+  scan: "network scan",
+  manual: "manual",
+};
+export const shortId = (id: string | null | undefined) => (id ? id.slice(0, 8) : "");
 
 // ---------------------------------------------------------------------------
 

@@ -145,7 +145,7 @@ export type ServerFrame =
   | { op: "challenge"; nonce: string; hub_id: string; hub_name: string; protocol: number }
   // server_proof = HMAC-SHA256(token, "agentlink-v2|s|" + cnonce + "|" + nonce + "|" + hub_id), hex. The client verifies it before
   // sending any other frame; a mismatch means an impostor: close, log hub.impostor, never retry that address this run.
-  // session = a random bearer for REST, valid while this socket is open (+60s grace). REST never sees the shared token.
+  // session = a random bearer for REST, valid while this socket is open (+60s grace). REST never sees a token.
   | { op: "welcome"; hub_id: string; hub_name: string; server_time: string; protocol: number; server_proof: string; session: string }
   | { op: "snapshot"; users: UserPresence[]; context: ContextEntry[]; last_seq: number } // right after welcome
   // daemon only

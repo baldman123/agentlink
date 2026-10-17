@@ -13,7 +13,9 @@ import { dirname, join } from "node:path";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
-import type { ScreenUpdate } from "../../contracts/index.ts";
+import { WebSocket } from "ws";
+import type { ScreenUpdate, ServerFrame } from "../../contracts/index.ts";
+import { handshake } from "../../hub/test/handshake.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BRIDGE_DIR = join(HERE, "..");
@@ -115,6 +117,30 @@ function spawnBridge(env: Record<string, string>): ChildProcess {
   return child;
 }
 const children: ChildProcess[] = [];
+
+let hubSocket: WebSocket | null = null;
+/** A REST session for the demo hub: open a v2 ui socket (hub/test/handshake.ts) and keep it open. */
+async function hubSession(): Promise<string> {
+  const ws = new WebSocket(`ws://127.0.0.1:${BASE}/ws`);
+  hubSocket = ws;
+  const queue: ServerFrame[] = [];
+  let closed = false;
+  ws.on("message", (d) => queue.push(JSON.parse(d.toString())));
+  ws.on("close", () => (closed = true));
+  await new Promise<void>((r, j) => (ws.once("open", () => r()), ws.once("error", j)));
+  const next = async () => {
+    for (let i = 0; i < 200 && !queue.length && !closed; i++) await sleep(10);
+    return queue.shift() ?? null;
+  };
+  const r = await handshake(ws, next, { token: TOKEN, user: "alex", role: "ui" });
+  if (!r.ok) throw new Error(`v2 handshake with the demo hub failed: ${r.reason}`);
+  return r.session;
+}
+
+function closeHubSocket() {
+  hubSocket?.close();
+  hubSocket = null;
+}
 
 let bridge: ChildProcess | null = null;
 function startBridge(direct: boolean) {
@@ -369,8 +395,10 @@ try {
     (s) => !!s && typeof s.text === "string",
   );
   check(viaDaemon && viaDaemon.text.includes("[redacted]") && !viaDaemon.text.includes(TOKEN), "daemon GET /v1/screens/worker-2 has the redacted screen", viaDaemon && { ...viaDaemon, text: viaDaemon.text.slice(-120) });
+  // Protocol v2: hub REST takes a session from a live socket's welcome, never the shared token.
+  const restSession = await hubSession();
   const hubScreens = await until(
-    () => fetch(`http://127.0.0.1:${BASE}/api/screens`, { headers: { authorization: `Bearer ${TOKEN}` } }).then((r) => r.json()).catch(() => ({ screens: [] })),
+    () => fetch(`http://127.0.0.1:${BASE}/api/screens`, { headers: { authorization: `Bearer ${restSession}` } }).then((r) => r.json()).catch(() => ({ screens: [] })),
     (r) => (r.screens ?? []).some((s: any) => s.address === "alex/worker-2"),
   );
   check((hubScreens.screens ?? []).some((s: any) => s.address === "alex/worker-2" && s.cols > 0 && !("text" in s)), "hub GET /api/screens lists alex/worker-2 (no text)", hubScreens);
@@ -381,6 +409,7 @@ try {
   failures++;
   console.error("bridge test crashed:", err);
 } finally {
+  closeHubSocket();
   await stopBridge();
   for (const c of children) if (c.exitCode === null) c.kill("SIGKILL");
   try {
