@@ -100,9 +100,18 @@ export class MockCloud {
     await this.context_.addCookies([{ name: "al_session", value: "test-session", url: this.baseURL, httpOnly: true, sameSite: "Lax" }]);
   }
 
+  /** Files PUT to the fake signed Storage URLs: id -> bytes received. */
+  stored = new Map<string, number>();
+
   async install(page: Page) {
     await page.addInitScript(FAKE_REALTIME);
     await page.route("**/api/**", (route) => this.handle(route, page));
+    // the signed upload URLs POST /api/files hands out (uploads.md "Website")
+    await page.route("**/fake-storage/**", (route) => {
+      const id = new URL(route.request().url()).pathname.split("/").pop()!;
+      this.stored.set(id, route.request().postDataBuffer()?.length ?? 0);
+      return route.fulfill({ status: 200, contentType: "application/json", body: "{}", headers: { "access-control-allow-origin": "*" } });
+    });
   }
 
   private json(route: Route, status: number, body?: unknown) {
@@ -145,6 +154,11 @@ export class MockCloud {
         messages: list.map((m) => ({ ...m, from: m.from_addr, to: m.to_addr })),
       });
     }
+    if (path === "/api/files" && method === "POST") {
+      const id = crypto.randomUUID();
+      return this.json(route, 201, { id, name: body.name, upload_url: `${this.baseURL}/fake-storage/${id}`, expires_at: iso(-7 * 86_400_000) });
+    }
+    if (/^\/api\/files\/[^/]+\/complete$/.test(path) && method === "POST") return this.json(route, 200, { id: path.split("/")[3] });
     if (path === "/api/messages" && method === "POST") {
       this.sent.push(body);
       const id = `m${this.sent.length}-${Math.random().toString(36).slice(2, 8)}`;

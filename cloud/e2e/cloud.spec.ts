@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
 import { callRow, messageRow, MockCloud, OWNER } from "./mock.ts";
 
@@ -98,17 +99,23 @@ test.describe("the app", () => {
     await expect(panel.locator(".boss-wait")).toHaveCount(0);
   });
 
-  test("files: the website says plainly that it can't relay them yet, and sends nothing", async ({ page }) => {
+  test("files: attach, upload straight to Storage, send with the sha256 recorded", async ({ page }) => {
     await openApp(page);
     const bp = page.locator(".bp-composer");
-    await bp.locator("[data-testid=attach-input]").setInputFiles({ name: "shot.png", mimeType: "image/png", buffer: Buffer.from("png") });
-    await expect(bp.locator(".att-chip.att-bad .att-err")).toContainText("File uploads through the website need storage set up; see SETUP.md");
+    const bytes = Buffer.from("not really a png, but 32 bytes!!");
+    await bp.locator("[data-testid=attach-input]").setInputFiles({ name: "shot.png", mimeType: "image/png", buffer: bytes });
+    await expect(bp.locator(".att-chip", { hasText: "shot.png" })).toBeVisible();
+    await expect(bp.locator(".att-uploading")).toHaveCount(0);
+    await expect(bp.locator(".att-bad")).toHaveCount(0);
+    expect([...cloud.stored.values()]).toEqual([bytes.length]); // the bytes went to the signed URL, not the API
+    expect(cloud.calls.filter((c) => c.includes("/api/files"))).toHaveLength(2); // reserve + complete
     await bp.getByLabel("Message the boss").fill("with a file");
-    await expect(bp.getByRole("button", { name: "Send" })).toBeDisabled();
-    await bp.getByRole("button", { name: "Remove shot.png" }).click();
-    await expect(bp.getByRole("button", { name: "Send" })).toBeEnabled();
-    expect(cloud.sent.length).toBe(0);
-    expect(cloud.calls.some((c) => c.includes("/files"))).toBe(false); // no storage calls of any kind
+    await bp.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => cloud.sent.length).toBe(1);
+    const att = (cloud.sent[0].body as { attachments: { name: string; size: number; sha256: string }[] }).attachments;
+    expect(att).toHaveLength(1);
+    expect(att[0]).toMatchObject({ name: "shot.png", size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
+    await page.unrouteAll({ behavior: "ignoreErrors" }); // the mock may still be pushing the sent row to the page
   });
 
   test("teams, sessions and presence follow Realtime", async ({ page }) => {

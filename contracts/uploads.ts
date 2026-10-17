@@ -30,6 +30,36 @@ export interface Attachment {
   error?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Website (cloud mode, uploads.md "Website"): the bytes go straight to Supabase Storage with signed URLs, never
+// through the API. A file is readable by its uploader and by the recipients of the messages that name it.
+
+/** POST /api/files: reserve a file and get a URL to PUT its bytes to. `id` may be proposed (the daemon's upload id). */
+export interface CloudFileCreate {
+  id?: string;
+  name: string;
+  size: number;
+  sha256: string;
+  mime?: string;
+}
+export interface CloudFileCreated {
+  id: string;
+  name: string; // sanitised
+  /** PUT the raw bytes here (Content-Type = the file's type); null when this uploader already finished this id. */
+  upload_url: string | null;
+  expires_at: string; // the file is deleted after this
+}
+/** GET /api/files/:id: a short-lived URL to GET the bytes from. */
+export interface CloudFileDownload {
+  id: string;
+  name: string;
+  size: number;
+  sha256: string;
+  mime?: string;
+  url: string;
+  expires_at: string;
+}
+
 /** POST /v1/uploads answer: the stored file on this laptop. */
 export interface UploadResult extends Attachment {
   path: string;

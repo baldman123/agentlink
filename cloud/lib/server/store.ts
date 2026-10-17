@@ -99,6 +99,43 @@ export interface Store {
   listCalls(user: string): Promise<Call[]>;
   /** Records a site answer on a pending call. */
   answerCall(user: string, id: string, answer: CallAnswer): Promise<{ ok: true; call: Call } | { ok: false; reason: "not_found" | "already_answered" }>;
+
+  // files (uploads.md "Website")
+  /** False when the id is taken. */
+  createFile(row: FileRow): Promise<boolean>;
+  getFile(id: string): Promise<FileRow | null>;
+  markFileUploaded(id: string, at: string): Promise<void>;
+  /** Adds users (or "*") to each file's recipients, without duplicates. */
+  addFileRecipients(ids: string[], recipients: string[]): Promise<void>;
+  /** Files whose expires_at is before `nowIso`, oldest first. */
+  expiredFiles(nowIso: string, limit: number): Promise<FileRow[]>;
+  deleteFiles(ids: string[]): Promise<void>;
+}
+
+/** One file relayed through the website (table files, uploads.md "Website"). */
+export interface FileRow {
+  id: string;
+  uploader: string;
+  recipients: string[]; // users who may download it ("*" = everyone), added as messages naming it are accepted
+  name: string;
+  size: number;
+  sha256: string;
+  mime: string | null;
+  storage_path: string;
+  created_at: string;
+  uploaded_at: string | null; // set by POST /api/files/:id/complete once Storage has every byte
+  expires_at: string;
+}
+
+/** The bytes, in a private Storage bucket. Only the API talks to it; clients get short-lived signed URLs. */
+export interface FileStorage {
+  /** A URL the client PUTs the bytes to (valid about 2 hours). */
+  signedUploadUrl(path: string): Promise<string>;
+  /** A URL the client GETs the bytes from, valid for `seconds`. */
+  signedDownloadUrl(path: string, seconds: number): Promise<string>;
+  /** The stored object's size in bytes, or null when nothing is there. */
+  size(path: string): Promise<number | null>;
+  remove(paths: string[]): Promise<void>;
 }
 
 /** Sends a server-originated Realtime broadcast (service role). */

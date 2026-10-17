@@ -66,6 +66,48 @@ export function putToHub(base: string, session: string, a: Attachment, to: strin
   });
 }
 
+/** PUT a local file's bytes to a signed Storage URL (website mode). */
+export function putToUrl(url: string, filePath: string, size: number, mime: string | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const req = request(url, { method: "PUT", headers: { "content-type": mime || "application/octet-stream", "content-length": String(size), "x-upsert": "true" } });
+    req.on("timeout", () => req.destroy(new Error("storage upload timed out")));
+    req.on("error", reject);
+    req.on("response", async (res) => {
+      const text = await readAll(res);
+      if ((res.statusCode ?? 500) < 300) return resolve();
+      const err = `storage refused the upload (HTTP ${res.statusCode}): ${text.slice(0, 160)}`;
+      reject((res.statusCode ?? 500) >= 500 ? new Error(err) : new PermanentFileError(err));
+    });
+    const src = fs.createReadStream(filePath);
+    src.on("error", (e) => req.destroy(e));
+    src.pipe(req);
+  });
+}
+
+/** GET a file from a signed Storage URL into the uploads folder, checking size and sha256 (website mode). */
+export function getFromUrl(url: string, a: Attachment, store: Store, uploadsDir: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const req = request(url, { method: "GET" });
+    req.on("timeout", () => req.destroy(new Error("storage download timed out")));
+    req.on("error", reject);
+    req.on("response", async (res) => {
+      if (res.statusCode !== 200) {
+        const text = await readAll(res);
+        const msg = `storage answered ${res.statusCode} for ${a.name}: ${text.slice(0, 120)}`;
+        return reject((res.statusCode ?? 500) >= 500 ? new Error(msg) : new PermanentFileError(msg));
+      }
+      try {
+        const u = await storeFile(res, { store, uploadsDir, name: a.name, mime: a.mime, maxBytes: UPLOAD_MAX_HUB_BYTES, id: a.id, expectSize: a.size, expectSha: a.sha256 });
+        resolve(u.path);
+      } catch (err) {
+        if (err instanceof UploadTooLarge || err instanceof UploadMismatch) reject(new PermanentFileError(`${a.name}: ${(err as Error).message}`));
+        else reject(err);
+      }
+    });
+    req.end();
+  });
+}
+
 /** GET one file from the hub into this laptop's uploads folder, checking its size and sha256. */
 export function getFromHub(base: string, session: string, a: Attachment, store: Store, uploadsDir: string): Promise<string> {
   return new Promise((resolve, reject) => {

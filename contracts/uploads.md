@@ -71,11 +71,24 @@ The command bar (input.md) types the same lines into its own panes, after the ty
 
 ## Website (cloud mode)
 
-Not relayed yet. A file needs somewhere to live between two laptops, and the website has no file storage. Until there is:
+Added 2026-10-17. The bytes live in a private Supabase Storage bucket (`AGENTLINK_FILES_BUCKET`, default `agentlink-files`) and move
+with signed URLs; the API only reserves, checks and signs. Table `files` (migration `20261018000000_files.sql`) records uploader,
+recipients, name, size, sha256, mime, storage path (`<uploader>/<id>`), uploaded_at and expires_at (created + 7 days).
 
-- the website's composers show "File uploads through the website need storage set up; see SETUP.md";
-- a daemon in cloud mode refuses `POST /v1/send` with files for another person: `501 uploads_need_storage`, same text;
-- files to the person's own agents work in cloud mode too (they never leave the laptop), from the local app at `http://127.0.0.1:7780`;
-- a delivered message that names a file this laptop doesn't have shows `[attachment not available: … (file uploads through the website need storage set up; see SETUP.md)]`.
+| Method | Path | Result |
+|---|---|---|
+| POST | `/api/files` | `{id?, name, size, sha256, mime?}` → `201 {id, name, upload_url, expires_at}`. `413 file_too_large` over 200 MB. The same uploader may repeat an id with the same size and sha256 (a retry; `upload_url` is null once finished); anyone else gets `409 id_taken` |
+| PUT | `upload_url` | the raw bytes, straight to Storage |
+| POST | `/api/files/:id/complete` | uploader only; Storage must hold exactly `size` bytes (`409 not_uploaded`, `400 incomplete_upload`) |
+| GET | `/api/files/:id` | `{id, name, size, sha256, mime?, url, expires_at}` with a 10-minute download URL, for the uploader and recipients; anyone else `404`; `410 expired` |
+| GET / POST | `/api/files/cleanup` | deletes expired files (bytes, then rows). GET with `Authorization: Bearer $CRON_SECRET` (Vercel Cron), POST for the owner. Each new upload also sweeps up to 20 |
 
-SETUP.md, "Files through the website", lists what the website needs.
+`POST /api/messages`: a message to someone else may name only the sender's own finished, unexpired files (else `422 bad_attachment`).
+The server rewrites `body.attachments` from its rows (name, size, sha256, mime; never a path) and adds the recipients (their user, or
+`*`) to each file before storing the message, so every delivery's files are readable by the person it reaches. Files for the sender's
+own agents pass through unchanged.
+
+The browser hashes the file (SHA-256), reserves it, PUTs it with progress, and completes it, all when the file is attached. A daemon in
+cloud mode does the same in its outbox pump before sending the envelope (reusing its local upload id), and on delivery fetches each
+file it doesn't have with `GET /api/files/:id`, checks size and sha256, stores it under `data/uploads/<date>/` and only then stores
+and acks the message. A network failure leaves the delivery unacked for the next resume.
