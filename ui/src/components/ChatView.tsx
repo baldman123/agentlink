@@ -3,6 +3,7 @@ import type { Address, MessageType, StoredMessage } from "../../../contracts/ind
 import { HUMAN_AGENT } from "../../../contracts/index.ts";
 import { clockTime, involves, userOf } from "../lib.ts";
 import { findSession, myChats, sortSessions } from "../store.ts";
+import { AttachButton, AttachmentChips, useAttachments } from "./Attachments.tsx";
 import { Addr, Avatar, Skeleton, StatusDot, useApp } from "./bits.tsx";
 import { MessageItem } from "./Message.tsx";
 import { ViewToggle } from "./ViewToggle.tsx";
@@ -189,13 +190,21 @@ export function useSend() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const send = useCallback(
-    async (req: { to: Address; type: MessageType; body: string; replyTo?: string | null }): Promise<boolean> => {
+    async (req: { to: Address; type: MessageType; body: string; replyTo?: string | null; attachments?: string[] }): Promise<boolean> => {
       const body = req.body.trim();
-      if (!body) return false;
+      const files = req.attachments ?? [];
+      if (!body && !files.length) return false;
       setBusy(true);
       setErr("");
       try {
-        await transport.send({ from_agent: HUMAN_AGENT, to: req.to, type: req.type, body, reply_to: req.replyTo ?? null });
+        await transport.send({
+          from_agent: HUMAN_AGENT,
+          to: req.to,
+          type: req.type,
+          body,
+          reply_to: req.replyTo ?? null,
+          ...(files.length ? { attachments: files } : {}),
+        });
         return true;
       } catch (e) {
         setErr(`Not sent: ${(e as Error).message}. Your text is still here.`);
@@ -243,18 +252,23 @@ function Composer({ address, replyTo, clearReply }: { address: Address; replyTo:
   // a reply target that isn't a listed session (e.g. someone's human) still needs an option
   const extra = listed.has(to) ? null : to;
 
+  const isRemote = to === "*" || userOf(to) !== me;
+  const files = useAttachments(isRemote);
+  const ready = (!!text.trim() || files.ids.length > 0) && !files.blocker;
+
   const send = async () => {
-    if (!text.trim() || busy) return;
-    if (await sendReq({ to, type, body: text, replyTo: replyTo?.id })) {
+    if (!ready || busy) return;
+    if (await sendReq({ to, type, body: text, replyTo: replyTo?.id, attachments: files.ids })) {
       setText("");
+      files.clear();
       clearReply();
     }
     ta.current?.focus();
   };
 
-  const isRemote = to === "*" || userOf(to) !== me;
   return (
-    <div className="composer">
+    <div className={`composer ${files.dragging ? "drop-on" : ""}`} {...files.dropHandlers}>
+      {files.dragging && <div className="drop-hint" aria-hidden>Drop files to attach</div>}
       {replyTo && (
         <div className="replying">
           Replying to <Addr a={replyTo.from} me={me} />
@@ -269,6 +283,7 @@ function Composer({ address, replyTo, clearReply }: { address: Address; replyTo:
         rows={2}
         placeholder={`Message ${to === "*" ? "everyone" : to}… Markdown works.`}
         onChange={(e) => setText(e.target.value)}
+        onPaste={files.onPaste}
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
             e.preventDefault();
@@ -277,7 +292,9 @@ function Composer({ address, replyTo, clearReply }: { address: Address; replyTo:
         }}
         aria-label="Message"
       />
+      <AttachmentChips items={files.items} onRemove={files.remove} crossesHub={isRemote} />
       <div className="composer-bar">
+        <AttachButton onFiles={files.add} />
         <label className="sel">
           <span>To</span>
           <select value={to} onChange={(e) => setTo(e.target.value)}>
@@ -307,9 +324,10 @@ function Composer({ address, replyTo, clearReply }: { address: Address; replyTo:
         </label>
         {isRemote && <span className="hint" title="Messages to other users arrive as requests; they decide whether to act.">Arrives as a request</span>}
         {err && <span className="err">{err}</span>}
+        {!err && (files.blocker || files.notice) && <span className="hint att-hint">{files.blocker || files.notice}</span>}
         <span className="grow" />
         <kbd className="kbd">⌘↵</kbd>
-        <button className="btn btn-primary" onClick={send} disabled={!text.trim() || busy}>
+        <button className="btn btn-primary" onClick={send} disabled={!ready || busy}>
           {busy ? "Sending…" : "Send"}
         </button>
       </div>

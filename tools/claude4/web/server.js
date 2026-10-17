@@ -20,6 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, execFile } from "node:child_process";
+import { Transform, pipeline } from "node:stream";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { WebSocketServer } from "ws";
@@ -365,6 +366,83 @@ const readBody = (req, cb) => {
 };
 const online = (id) => [...sockets].some((ws) => ws.c4who.person?.id === id);
 
+// ---- uploads: files dropped, pasted or picked on the page ----
+// Each one is streamed to ~/.claude4/uploads/<session>/<yyyymmdd-hhmmss>-<name>, then its path is pasted
+// (bracketed, no Enter) into the pane's input, so the person can keep typing around it. Uploads live
+// outside ~/.claude4/<session>/ because claude4 wipes that folder on every start, and the paths stay in
+// the Claudes' conversations.
+const UPLOAD_MAX = Number(process.env.C4_UPLOAD_MAX || 2 * 1024 ** 3);
+// The last path segment only, no control characters, no leading dots (so no "." or ".."), extension kept.
+function safeName(raw) {
+  let n = String(raw || "").normalize("NFC").split(/[\\/]/).pop().replace(/[\x00-\x1f\x7f]/g, "").replace(/[<>:"|?*`]/g, "_").trim();
+  n = n.replace(/^\.+/, "").trim() || "file";
+  const dot = n.lastIndexOf(".");
+  const ext = dot > 0 && n.length - dot <= 16 ? n.slice(dot) : "";
+  let base = ext ? n.slice(0, dot) : n;
+  while (Buffer.byteLength(base + ext) > 150) base = base.slice(0, -1);
+  return (base || "file") + ext;
+}
+const stamp = (d = new Date()) => {
+  const p = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+};
+// The tmux pane for a slot, from the session's registry, if it's still there.
+async function paneOf(session, slot) {
+  let reg = "";
+  try { reg = fs.readFileSync(path.join(STATE_ROOT, session, "panes"), "utf8"); } catch { return null; }
+  const hit = reg.split("\n").map((l) => l.trim().split(/\s+/)).find(([s]) => s !== "" && Number(s) === slot);
+  if (!hit || !/^%\d+$/.test(hit[1] || "")) return null;
+  return (await tmux(["display", "-p", "-t", hit[1], "#{pane_id}"]))?.trim() === hit[1] ? hit[1] : null;
+}
+// Bracketed paste (only if the app asked for it, as Claude Code does), without Enter.
+async function pasteInto(pane, text) {
+  const buf = `c4up-${crypto.randomBytes(4).toString("hex")}`;
+  if ((await tmux(["set-buffer", "-b", buf, "--", text])) === null) return false;
+  return (await tmux(["paste-buffer", "-p", "-d", "-b", buf, "-t", pane])) !== null;
+}
+const quotePath = (p) => (/[\s"'\\]/.test(p) ? `"${p.replace(/(["\\])/g, "\\$1")}"` : p);
+
+async function upload(req, res, url, who, session) {
+  const refuse = (code, error) => { res.setHeader("connection", "close"); json(res, code, { ok: false, error }); req.resume(); };
+  // Same rule as typing: the owner and people who can type; read the role live.
+  const role = who.owner ? "owner" : personById(who.person.id)?.role;
+  if (role !== "owner" && role !== "full") return refuse(403, "Watch only: you can't send files.");
+  const slot = Number(url.searchParams.get("slot"));
+  if (!SESSION_RE.test(session) || !Number.isInteger(slot) || slot < 0 || slot > 9) return refuse(400, "bad session or slot");
+  const len = Number(req.headers["content-length"]);
+  if (len > UPLOAD_MAX) return refuse(413, `Too big: the limit is ${UPLOAD_MAX >= 1024 ** 3 ? `${+(UPLOAD_MAX / 1024 ** 3).toFixed(1)} GB` : `${Math.round(UPLOAD_MAX / 1024 ** 2)} MB`}.`);
+  const pane = await paneOf(session, slot);
+  if (!pane) return refuse(404, "That pane isn't running.");
+  const dir = path.join(STATE_ROOT, "uploads", session);
+  const name = safeName(url.searchParams.get("name"));
+  let file, fd;
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    for (let i = 1; !fd; i++) {
+      file = path.join(dir, `${stamp()}-${i > 1 ? `${i}-` : ""}${name}`);
+      try { fd = fs.openSync(file, "wx", 0o600); } catch (e) { if (e.code !== "EEXIST" || i > 50) throw e; }
+    }
+  } catch (e) { log(`upload failed: ${e.message}`); return refuse(500, "Couldn't save the file."); }
+  let size = 0;
+  const count = new Transform({
+    transform(chunk, _enc, cb) {
+      size += chunk.length;
+      cb(size > UPLOAD_MAX ? Object.assign(new Error("too big"), { code: "TOO_BIG" }) : null, chunk);
+    },
+  });
+  pipeline(req, count, fs.createWriteStream(null, { fd }), async (err) => {
+    if (err) {
+      fs.rm(file, { force: true }, () => {});
+      log(`upload aborted session=${session} slot=${slot} name=${JSON.stringify(name)} after ${size}B: ${err.code || err.message}`);
+      if (!res.headersSent && !res.destroyed) json(res, err.code === "TOO_BIG" ? 413 : 400, { ok: false, error: err.code === "TOO_BIG" ? "Too big." : "The upload didn't finish." });
+      return;
+    }
+    const pasted = await pasteInto(pane, `[attached: ${quotePath(file)}] `);
+    log(`upload session=${session} slot=${slot} name=${JSON.stringify(who.name)} file=${JSON.stringify(path.basename(file))} ${size}B pasted=${pasted}`);
+    json(res, 200, { ok: true, path: file, size, pasted });
+  });
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
   if (url.pathname === "/health") return res.end("ok");
@@ -394,12 +472,13 @@ const server = http.createServer((req, res) => {
   }
   if (!url.pathname.startsWith("/api/")) { res.writeHead(404); return res.end(); }
 
-  const session = url.searchParams.get("s") || "";
+  const session = url.searchParams.get("s") || url.searchParams.get("session") || "";
   // Every guest call and every POST; the owner's own page polls GETs, which would flood the log.
   if (!who.owner || req.method !== "GET") log(`api ${req.method} ${url.pathname} name=${JSON.stringify(who.name)} role=${who.role}${session ? ` session=${session}` : ""}`);
   if (req.method === "POST" && !originOk(req)) { res.writeHead(403); return res.end(); }
 
   if (url.pathname === "/api/me" && req.method === "GET") return json(res, 200, { name: who.name, role: who.role, owner: !!who.owner });
+  if (url.pathname === "/api/upload" && req.method === "POST") return void upload(req, res, url, who, session);
 
   if (url.pathname.startsWith("/api/people")) {
     if (!who.owner) { res.writeHead(403); return res.end(); }

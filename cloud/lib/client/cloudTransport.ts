@@ -12,7 +12,7 @@ import type {
   UiBootstrap,
   UserPresence,
 } from "../../../contracts/index.ts";
-import type { ConnectHandlers, ContextPutResult, MessageQuery, PaneInputResponse, PaneInputStatus, Transport } from "../../../ui/src/lib.ts";
+import { UploadUnavailable, type ConnectHandlers, type ContextPutResult, type MessageQuery, type PaneInputResponse, type PaneInputStatus, type Transport } from "../../../ui/src/lib.ts";
 import { screenStore } from "../../../ui/src/screens.ts";
 import { api, ApiError, getConfig, getMe, refresh, signOut, type Me } from "./api.ts";
 import { openLive, type DbChange, type Live, type PresenceEntry } from "./realtime.ts";
@@ -323,6 +323,11 @@ export function cloudTransport(): Transport & { me(): Me | null } {
     async health() {
       return null; // no local daemon on the website
     },
+    async upload() {
+      // the page can't reach the laptop's daemon from https, and the website has no file storage yet (uploads.md "Website")
+      throw new UploadUnavailable("File uploads through the website need storage set up; see SETUP.md. The app on your laptop (http://127.0.0.1:7780) can send files.");
+    },
+    async deleteUpload() {},
   };
 }
 

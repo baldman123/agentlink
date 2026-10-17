@@ -98,6 +98,19 @@ test.describe("the app", () => {
     await expect(panel.locator(".boss-wait")).toHaveCount(0);
   });
 
+  test("files: the website says plainly that it can't relay them yet, and sends nothing", async ({ page }) => {
+    await openApp(page);
+    const bp = page.locator(".bp-composer");
+    await bp.locator("[data-testid=attach-input]").setInputFiles({ name: "shot.png", mimeType: "image/png", buffer: Buffer.from("png") });
+    await expect(bp.locator(".att-chip.att-bad .att-err")).toContainText("File uploads through the website need storage set up; see SETUP.md");
+    await bp.getByLabel("Message the boss").fill("with a file");
+    await expect(bp.getByRole("button", { name: "Send" })).toBeDisabled();
+    await bp.getByRole("button", { name: "Remove shot.png" }).click();
+    await expect(bp.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(cloud.sent.length).toBe(0);
+    expect(cloud.calls.some((c) => c.includes("/files"))).toBe(false); // no storage calls of any kind
+  });
+
   test("teams, sessions and presence follow Realtime", async ({ page }) => {
     await openApp(page);
     await page.getByRole("tab", { name: "Team" }).first().click();

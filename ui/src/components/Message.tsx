@@ -5,6 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import type { RichBody, StoredMessage } from "../../../contracts/index.ts";
 import { HUMAN_AGENT } from "../../../contracts/index.ts";
 import { bodyOf, clockTime, userColor, userOf } from "../lib.ts";
+import { MessageFiles } from "./Attachments.tsx";
 import { Addr, Avatar, StatusDot, useApp } from "./bits.tsx";
 
 // Images render as plain links so a remote message can't make the browser fetch arbitrary URLs.
@@ -98,6 +99,7 @@ export function Body({ body }: { body: StoredMessage["body"] }) {
   return (
     <>
       {r.text && <Markdown text={r.text} />}
+      {Array.isArray(r.attachments) && <MessageFiles files={r.attachments} />}
       {r.tool && <ToolCall tool={r.tool} />}
       {r.log && <LogBlock log={r.log} />}
       {r.context_key && (

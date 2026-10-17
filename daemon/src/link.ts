@@ -15,6 +15,8 @@ export interface DaemonHubLink extends EventEmitter {
   readonly hubId: string | null;
   readonly searching: boolean;
   readonly connected: boolean;
+  /** Can this link carry files to another person's laptop (uploads.md)? The LAN hub always can; the website only with storage set up. */
+  readonly relaysFiles: boolean;
   start(): void;
   stop(): void;
   /** Send due outbox items. `all` ignores next_attempt_at. */

@@ -1,7 +1,12 @@
 // agentlink shared contracts — v1.
 // Every component builds against these types. Changes go through the orchestrator only.
 
+import type { Attachment } from "./uploads.ts";
+export * from "./uploads.ts";
+
 export const PROTOCOL_VERSION = 2; // v2: challenge-response auth, the token never crosses the network (see hub-api.md "Auth")
+// v2 + files (uploads.md): RichBody.attachments and the hub's /api/files routes. Additive, so no bump: a hub without
+// /api/files answers 404 and the sender reports that the file couldn't be relayed.
 export const HOP_LIMIT = 5; // a message with hops > HOP_LIMIT is dropped and logged
 export const MDNS_SERVICE_TYPE = "agentlink"; // advertised as _agentlink._tcp
 export const HEARTBEAT_INTERVAL_MS = 10_000;
@@ -28,6 +33,7 @@ export interface RichBody {
   status?: SessionStatus; // for type "status"
   task?: string; // for type "status": one-line current task
   context_key?: string; // for type "context_update"
+  attachments?: Attachment[]; // files (uploads.md); added in v2 without a protocol bump: older peers show them as extra fields
   [k: string]: unknown;
 }
 
@@ -197,6 +203,7 @@ export interface SendRequest {
   body: string | RichBody;
   reply_to?: string | null;
   hops?: number; // set only when forwarding a received message: original.hops + 1
+  attachments?: string[]; // ids from POST /v1/uploads; the daemon puts the files in body.attachments (uploads.md)
 }
 export interface SendResponse { id: string; queued: true }
 

@@ -91,6 +91,7 @@ If `since_seq` is set in hello, the server replays stored events with seq > sinc
 | PUT | `/api/context/:key` | body `ContextWrite` → 200 `ContextEntry`; 409 `{error:"conflict", current: ContextEntry}` on version mismatch; 400 on bad key/kind |
 | DELETE | `/api/context/:key?author=` | 204; emits `context.deleted` |
 | GET | `/api/events?since=<seq>&limit=200` | `{ frames: EventFrame[] }` for backfill |
+| PUT / GET | `/api/files/:id` | relayed files, daemon sessions only (uploads.md "LAN hub"); 200 MB per file, kept 7 days |
 
 ## Persistence (SQLite, `AGENTLINK_HUB_DB`, default `./data/hub.sqlite`)
 

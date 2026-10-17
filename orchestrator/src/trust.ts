@@ -179,7 +179,8 @@ function agentOf(addr: string): string | null {
 export function bodyToText(body: string | RichBody): string {
   if (typeof body === "string") return body;
   const parts: string[] = [];
-  const { text, tool, log, status, task, context_key, ...rest } = body;
+  // attachments are rendered by the caller as "[attached: path]" lines (contracts/uploads.ts attachmentLines)
+  const { text, tool, log, status, task, context_key, attachments: _files, ...rest } = body;
   if (status) parts.push(`[status: ${status}${task ? ` — ${task}` : ""}]`);
   else if (task) parts.push(`[task: ${task}]`);
   if (context_key) parts.push(`[context: ${context_key}]`);

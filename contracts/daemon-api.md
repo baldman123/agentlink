@@ -93,6 +93,10 @@ Addressing: `user/agent` lands in that agent's inbox; `user/*` and `*` land in e
 | GET | `/v1/messages` | same query as hub | proxied hub `GET /api/messages` |
 | PUT | `/v1/sessions/:agent` | `{kind, status, task}` | 200 `Session` (local view); registers/updates the session and forwards `session.upsert` |
 | DELETE | `/v1/sessions/:agent` | | 204; forwards `session.remove` |
+| POST | `/v1/uploads?name=&mime=` | raw bytes | 201 `UploadResult`; the file is in `data/uploads/<date>/` (uploads.md) |
+| GET / DELETE | `/v1/uploads/:id` | | the stored file's `UploadResult` / 204 and the file is deleted |
+
+`POST /v1/send` also takes `attachments: [upload id]`; see uploads.md for the limits and what crosses the hub.
 
 Errors are JSON `{ error: string, detail?: string }`.
 

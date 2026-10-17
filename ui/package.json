@@ -6,7 +6,8 @@
     "dev": "vite --host 127.0.0.1 --port 7780 --strictPort",
     "build": "tsc --noEmit -p . && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 7780 --strictPort",
-    "typecheck": "tsc --noEmit -p ."
+    "typecheck": "tsc --noEmit -p .",
+    "test:e2e": "playwright test -c playwright.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/jetbrains-mono": "^5.3.0",

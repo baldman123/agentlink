@@ -2,7 +2,7 @@ import { appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HUMAN_AGENT, type InboxItem } from "../../contracts/index.ts";
-import { renderPaste, shortId } from "../../orchestrator/src/paste.ts";
+import { filesBlock, renderPaste, shortId } from "../../orchestrator/src/paste.ts";
 import { bodyToText, isUntrusted } from "../../orchestrator/src/trust.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { Daemon } from "./daemon.ts";
@@ -26,6 +26,7 @@ export function renderLocalHuman(item: InboxItem): string {
   return [
     "[agentlink message from you (UI)]",
     bodyToText(item.envelope.body),
+    ...filesBlock(item),
     "(Sent from the agentlink app. The person is reading there, not in this pane: an answer you only type here never reaches them.",
     "Send your answer with this command; it works from any folder:)",
     `Reply:   ${AGENTLINK_BIN} reply ${id8} "<your answer>"`,
