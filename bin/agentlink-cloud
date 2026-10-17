@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# People admin for the agentlink cloud site: invite, revoke, list. No install needed; works from any cwd.
+#
+#   AGENTLINK_CLOUD_URL=https://<app>.vercel.app agentlink-cloud invite sam
+#   agentlink-cloud --url https://<app>.vercel.app list
+#
+# Signs in with the master code (AGENTLINK_MASTER_CODE, or asked for). See cloud/bin/agentlink-cloud.mjs.
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [[ -L "$src" ]]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+
+exec node "$ROOT/cloud/bin/agentlink-cloud.mjs" "$@"

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# People admin for the hub on this laptop: invite, revoke, list. No install needed; works from any cwd.
+#
+#   agentlink-hub invite sam
+#   agentlink-hub revoke sam
+#   agentlink-hub list
+#
+# Run it on the laptop that hosts the hub: it reads the master token from ${AGENTLINK_DATA_DIR:-<repo>/data}/.token
+# and the hub port from local.env there. See hub/bin/agentlink-hub.mjs.
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [[ -L "$src" ]]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+
+exec node "$ROOT/hub/bin/agentlink-hub.mjs" "$@"

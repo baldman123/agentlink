@@ -1,0 +1,26 @@
+{
+  "name": "@agentlink/orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Orchestrator integration for agentlink: daemon client, CLI, and MCP server for Claude Code",
+  "bin": {
+    "agentlink": "bin/agentlink.mjs",
+    "agentlink-mcp": "bin/agentlink-mcp.mjs"
+  },
+  "scripts": {
+    "cli": "tsx src/cli.ts",
+    "mcp": "tsx src/mcp.ts",
+    "loop-test": "tsx scripts/loop-test.ts",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "tsx": "^4.23.15",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

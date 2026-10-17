@@ -2,7 +2,7 @@
   "name": "agentlink",
   "private": true,
   "type": "module",
-  "workspaces": ["hub", "daemon", "orchestrator", "ui"],
+  "workspaces": ["hub", "daemon", "orchestrator", "ui", "bridge", "cloud"],
   "scripts": {
     "hub": "npm run start -w hub",
     "daemon": "npm run start -w daemon",

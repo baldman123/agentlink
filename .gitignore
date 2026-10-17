@@ -6,3 +6,4 @@ dist/
 .env.*
 *.sqlite
 *.sqlite-*
+.vercel
