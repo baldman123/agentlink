@@ -247,6 +247,95 @@ test.describe("your calls", () => {
     await expect(page.locator(".calls")).toHaveCount(0);
   });
 
+  test("opens as a popup over the page; Escape, a click outside, and the button close it", async ({ page }) => {
+    cloud.yourCalls = [callRow(DELETE_BUILD)];
+    await openApp(page);
+    const btn = page.getByTestId("calls-btn");
+    const center = page.locator("main .center");
+    await expect(center).toBeVisible();
+    const centerBox = (await center.boundingBox())!;
+
+    await btn.click();
+    const pop = page.getByRole("dialog", { name: "Your calls" });
+    await expect(pop).toBeVisible();
+    await expect(btn).toHaveAttribute("aria-expanded", "true");
+    await expect(pop).toBeFocused();
+    await expect(pop.getByTestId("call-0jww8")).toBeVisible();
+    // the center view is still there underneath, same place and size
+    await expect(center).toBeVisible();
+    expect(await center.boundingBox()).toEqual(centerBox);
+    // it hangs under the button, right edges lined up, and floats above the page
+    const b = (await btn.boundingBox())!;
+    const p = (await pop.boundingBox())!;
+    expect(p.y).toBeGreaterThan(b.y + b.height);
+    expect(Math.abs(p.x + p.width - (b.x + b.width))).toBeLessThan(1);
+    expect(await pop.evaluate((el) => getComputedStyle(el).position)).toBe("absolute");
+
+    // Escape closes and focus goes back to the button
+    await page.keyboard.press("Escape");
+    await expect(pop).toHaveCount(0);
+    await expect(btn).toBeFocused();
+    await expect(btn).toHaveAttribute("aria-expanded", "false");
+
+    // a click outside closes it
+    await btn.click();
+    await expect(pop).toBeVisible();
+    await page.mouse.click(centerBox.x + centerBox.width / 2, centerBox.y + centerBox.height - 120);
+    await expect(pop).toHaveCount(0);
+
+    // the button toggles it; a click inside doesn't close it
+    await btn.click();
+    await pop.getByText("Details").click();
+    await expect(pop).toBeVisible();
+    await btn.click();
+    await expect(pop).toHaveCount(0);
+  });
+
+  test("a long list scrolls inside the popup, not the page", async ({ page }) => {
+    cloud.yourCalls = Array.from({ length: 8 }, (_, i) => callRow({ id: `c${i}xyz`, summary: `Call number ${i}, okay to go ahead?`, why: "Some reason.", minsAgo: 10 - i }));
+    await openApp(page);
+    await page.getByTestId("calls-btn").click();
+    const pop = page.getByRole("dialog", { name: "Your calls" });
+    await expect(pop.getByTestId("call-c7xyz")).toBeAttached();
+    const p = (await pop.boundingBox())!;
+    expect(p.y + p.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+    const list = pop.locator(".calls-list");
+    expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight)).toBe(true);
+  });
+
+  test("the popup fits at desktop, 375px and 360px, light and dark", async ({ page }) => {
+    cloud.yourCalls = [
+      callRow(DELETE_BUILD),
+      callRow({ id: "q07579", kind: "question", summary: "Which port should the dev server use?", details: "3000 or 3137", minsAgo: 2 }),
+      callRow({ id: "1abcd", summary: "Push the login fix to the shared branch?", minsAgo: 1 }),
+    ];
+    for (const theme of ["light", "dark"]) {
+      for (const width of [1440, 375, 360]) {
+        await page.setViewportSize({ width, height: width > 800 ? 900 : 812 });
+        await page.addInitScript((t) => localStorage.setItem("al.theme", JSON.stringify(t)), theme);
+        await cloud.signIn();
+        await page.goto("/?view=calls");
+        const pop = page.getByRole("dialog", { name: "Your calls" });
+        await expect(pop.getByTestId("call-1abcd")).toBeVisible();
+        await noHorizontalScroll(page);
+        const p = (await pop.boundingBox())!;
+        expect(p.x).toBeGreaterThanOrEqual(0);
+        expect(p.x + p.width).toBeLessThanOrEqual(width);
+        await pop.evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished))); // fade-in done
+        await page.screenshot({ path: `e2e/screenshots/calls-popup-${width}-${theme}.png` });
+      }
+    }
+  });
+
+  test("?view=calls opens the popup over the usual view", async ({ page }) => {
+    cloud.yourCalls = [callRow(DELETE_BUILD)];
+    await cloud.signIn();
+    await page.goto("/?view=calls");
+    await expect(page.getByRole("dialog", { name: "Your calls" })).toBeVisible();
+    await expect(page.locator("main .center")).toBeVisible();
+  });
+
   test("a pending call: question first, why, details folded; Yes sends, then it's answered and leaves", async ({ page }) => {
     cloud.yourCalls = [callRow(DELETE_BUILD), callRow({ id: "1abcd", summary: "Push the login fix to the shared branch?", minsAgo: 1 })];
     await openApp(page);
@@ -367,13 +456,20 @@ test.describe("phone @phone", () => {
       callRow({ id: "0jww8", summary: "Let worker 2 delete the old build folder?", why: "It frees 2 GB.", details: "rm -rf ~/agentlink/cloud/.next-old-" + "x".repeat(120), from: "quarter 2" }),
     ];
     await openApp(page);
-    const tab = page.locator(".mtabs").getByRole("tab", { name: "Calls, 1 waiting" });
+    const tab = page.locator(".mtabs").getByRole("button", { name: "Calls, 1 waiting" });
     await expect(tab.locator(".calls-badge")).toHaveText("1");
     await tab.click();
+    const pop = page.getByRole("dialog", { name: "Your calls" });
     const card = page.getByTestId("call-0jww8");
     await expect(card).toBeVisible();
+    await expect(page.locator(".bosspanel")).toBeVisible(); // the pane underneath stays
     await card.getByText("Details").click();
     await noHorizontalScroll(page);
+    const p = (await pop.boundingBox())!;
+    const tabs = (await page.locator(".mtabs").boundingBox())!;
+    expect(p.x).toBeGreaterThanOrEqual(0);
+    expect(p.x + p.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    expect(p.y + p.height).toBeLessThanOrEqual(tabs.y);
     for (const b of [card.getByRole("button", { name: "Yes" }), card.getByRole("button", { name: "No" }), page.getByTestId("calls-btn"), tab]) {
       const box = (await b.boundingBox())!;
       expect(box.height).toBeGreaterThanOrEqual(40);

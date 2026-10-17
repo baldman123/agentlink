@@ -254,6 +254,8 @@ function CallCard({ item, now, answer }: { item: CallItem; now: number; answer: 
   );
 }
 
+/** The popup under the Calls button. It floats over the page and closes on Close, Escape, or a click outside it;
+ *  the buttons that toggle it carry data-calls-toggle so a click on them toggles instead of counting as outside. */
 export function CallsPanel({ calls, close }: { calls: Calls; close(): void }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -262,9 +264,40 @@ export function CallsPanel({ calls, close }: { calls: Calls; close(): void }) {
   }, []);
   const { items, failed, pending } = calls;
 
+  const ref = useRef<HTMLElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  // close and put focus back on whatever opened it (the header button when opened by ?view=calls)
+  const dismiss = useCallback(() => {
+    const back = opener.current?.isConnected ? opener.current : document.querySelector<HTMLElement>("[data-testid='calls-btn']");
+    back?.focus();
+    closeRef.current();
+  }, []);
+  useEffect(() => {
+    const active = document.activeElement;
+    opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    ref.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented) dismiss();
+    };
+    // a click outside closes it without pulling focus back, so the thing clicked keeps it
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (!t || ref.current?.contains(t) || t.closest("[data-calls-toggle]")) return;
+      closeRef.current();
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", onDown);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", onDown);
+    };
+  }, [dismiss]);
+
   return (
-    <section className="center calls" aria-labelledby="calls-h">
-      <header className="center-head calls-head">
+    <section className="calls calls-pop" role="dialog" aria-label="Your calls" tabIndex={-1} ref={ref} data-testid="calls-pop">
+      <header className="calls-head">
         <div className="ch-title">
           <h2 className="ch-name" id="calls-h">
             Your calls
@@ -272,7 +305,7 @@ export function CallsPanel({ calls, close }: { calls: Calls; close(): void }) {
           <div className="ch-task">{pending ? `${pending} waiting for your yes or no` : "Yes/no decisions your team needs from you"}</div>
         </div>
         <span className="grow" />
-        <button className="btn btn-ghost calls-close" onClick={close}>
+        <button className="btn btn-ghost calls-close" onClick={dismiss}>
           Close
         </button>
       </header>

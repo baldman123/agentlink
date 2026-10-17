@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useApp } from "../../ui/src/components/bits.tsx";
 import { signOut } from "../lib/client/api.ts";
 import { Brand } from "./Brand.tsx";
@@ -13,6 +13,7 @@ export function CloudHeader({
   calls,
   callsOpen,
   toggleCalls,
+  callsPopup,
 }: {
   owner: boolean;
   theme: string;
@@ -20,6 +21,7 @@ export function CloudHeader({
   calls: number;
   callsOpen: boolean;
   toggleCalls(): void;
+  callsPopup: ReactNode; // the "Your calls" popup, anchored under the button while open
 }) {
   const { state } = useApp();
   const [leaving, setLeaving] = useState(false);
@@ -45,20 +47,25 @@ export function CloudHeader({
         <span className="conn-dot" />
         <span className="conn-text">{CONN_LABEL[state.conn]}{state.conn !== "connected" && state.connDetail ? ` · ${state.connDetail}` : ""}</span>
       </div>
-      <button
-        className={`calls-btn${calls ? " has-calls" : ""}`}
-        onClick={toggleCalls}
-        aria-pressed={callsOpen}
-        aria-label={calls ? `Your calls, ${calls} waiting` : "Your calls"}
-        data-testid="calls-btn"
-      >
-        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
-          <path d="M3 3.5h10v7H8.5L5.5 13v-2.5H3z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" fill="none" />
-          <path d="M8 5.6v2.2M8 9.4v.1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-        </svg>
-        <span className="calls-btn-text">Calls</span>
-        {calls > 0 && <span className="calls-badge">{calls}</span>}
-      </button>
+      <div className="calls-anchor">
+        <button
+          className={`calls-btn${calls ? " has-calls" : ""}`}
+          onClick={toggleCalls}
+          aria-haspopup="dialog"
+          aria-expanded={callsOpen}
+          aria-label={calls ? `Your calls, ${calls} waiting` : "Your calls"}
+          data-testid="calls-btn"
+          data-calls-toggle
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+            <path d="M3 3.5h10v7H8.5L5.5 13v-2.5H3z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" fill="none" />
+            <path d="M8 5.6v2.2M8 9.4v.1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+          <span className="calls-btn-text">Calls</span>
+          {calls > 0 && <span className="calls-badge">{calls}</span>}
+        </button>
+        {callsPopup}
+      </div>
       {owner && (
         <a className="navlink" href="/admin">
           People

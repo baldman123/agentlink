@@ -40,7 +40,10 @@ export function CloudApp() {
 
   const [tab, setTab] = useState<Tab>("boss"); // the boss panel is what you see first
   // phone: the boss panel first, unless the link asks for a view (?view=terminals), which then opens directly
-  const [mobile, setMobile] = useState<MobilePane>(() => (new URLSearchParams(location.search).has("view") ? "center" : "side"));
+  const [mobile, setMobile] = useState<MobilePane>(() => {
+    const q = new URLSearchParams(location.search).get("view");
+    return q && q !== "calls" ? "center" : "side"; // ?view=calls opens the calls popup over the usual first pane
+  });
   const [feed, setFeed] = useState<Address | null>(null);
   const [contextFocus, setContextFocus] = useState<AppCtx["contextFocus"]>(null);
   const [switcher, setSwitcher] = useState(false);
@@ -53,12 +56,11 @@ export function CloudApp() {
     return ok(saved) ? saved : "chat";
   });
   useEffect(() => saveStorage("al.view", view), [view]);
-  // "Your calls" takes the center column over the current view until closed (or another view or chat is picked)
+  // "Your calls" is a popup under the header button; it floats over whatever view is showing
   const calls = useCalls();
   const [callsOpen, setCallsOpen] = useState(() => new URLSearchParams(location.search).get("view") === "calls");
   const setView = useCallback((v: AppCtx["view"]) => {
     setViewState(v);
-    setCallsOpen(false);
     setMobile("center");
   }, []);
 
@@ -100,7 +102,6 @@ export function CloudApp() {
   useEffect(() => {
     if (!state.selected) return;
     if (firstSelect.current) return void (firstSelect.current = false);
-    setCallsOpen(false);
     if (window.matchMedia(PHONE).matches) setMobile("center");
   }, [state.selected]);
 
@@ -153,18 +154,14 @@ export function CloudApp() {
           toggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
           calls={calls.pending}
           callsOpen={callsOpen}
-          toggleCalls={() => {
-            setCallsOpen(!callsOpen);
-            setMobile("center");
-          }}
+          toggleCalls={() => setCallsOpen((o) => !o)}
+          callsPopup={callsOpen && <CallsPanel calls={calls} close={() => setCallsOpen(false)} />}
         />
         <ActivityStrip />
         <main className="cols">
           <ChatList />
           <Resizer side="left" width={leftW} setWidth={setLeftW} min={200} max={380} />
-          {callsOpen ? (
-            <CallsPanel calls={calls} close={() => setCallsOpen(false)} />
-          ) : view === "team" ? (
+          {view === "team" ? (
             <TeamView />
           ) : view === "terminals" ? (
             <TerminalsView />
@@ -179,25 +176,16 @@ export function CloudApp() {
             <svg viewBox="0 0 18 18" aria-hidden><path d="M3 4.5h12M3 9h12M3 13.5h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" fill="none" /></svg>
             Chats{unread ? ` (${unread})` : ""}
           </button>
-          <button
-            role="tab"
-            aria-selected={mobile === "center" && !callsOpen}
-            onClick={() => {
-              setCallsOpen(false);
-              setMobile("center");
-            }}
-          >
+          <button role="tab" aria-selected={mobile === "center"} onClick={() => setMobile("center")}>
             <svg viewBox="0 0 18 18" aria-hidden><rect x="2.5" y="3" width="13" height="12" rx="2" stroke="currentColor" strokeWidth="1.6" fill="none" /><path d="M2.5 7h13" stroke="currentColor" strokeWidth="1.6" /></svg>
             {view === "team" ? "Team" : view === "terminals" ? "Terminals" : "Chat"}
           </button>
           <button
-            role="tab"
-            aria-selected={mobile === "center" && callsOpen}
+            aria-haspopup="dialog"
+            aria-expanded={callsOpen}
             aria-label={calls.pending ? `Calls, ${calls.pending} waiting` : "Calls"}
-            onClick={() => {
-              setCallsOpen(true);
-              setMobile("center");
-            }}
+            onClick={() => setCallsOpen((o) => !o)}
+            data-calls-toggle
           >
             <svg viewBox="0 0 18 18" aria-hidden><path d="M3 3.5h12v8H9.5L6 14.5v-3H3z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" fill="none" /><path d="M9 6v2.6M9 10.4v.1" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
             Calls
