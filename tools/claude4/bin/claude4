@@ -220,7 +220,7 @@ for q in {1..$panes}; do
   print -- "$q $(tmux display -p -t "$SESSION:0.$(( q - 1 ))" '#{pane_id}')" >> "$STATE/panes"
 done
 
-# ── look: dark, quiet, one orange accent ──────────────────────────────────
+# ── look: dark, quiet, one pastel blue accent, pastel status colours ──────
 T() { tmux set -t "$SESSION" "$@"; }
 tmux set -s escape-time 10              # Esc reaches Claude right away
 tmux set -s extended-keys on            # Shift+Enter for new lines in Claude
@@ -231,20 +231,20 @@ T history-limit 50000
 T status-position bottom
 T status-style "bg=#141821,fg=#7f879a"
 T status-left-length 30
-T status-left "#[bg=#f5a623,fg=#141821,bold]  claude4 #[bg=#141821,fg=#f5a623] "
+T status-left "#[bg=#a7c7e7,fg=#0a1520,bold]  claude4 #[bg=#141821,fg=#a7c7e7] "
 T status-right-length 90
 T status-right "#[fg=#5c6477]click a quarter to type · ^b z zoom · ^b d detach  #[fg=#c0c6d4]%H:%M "
 T window-status-format ""
 T window-status-current-format ""
 T pane-border-lines heavy
 T pane-border-style "fg=#2a3040"
-T pane-active-border-style "fg=#f5a623"
+T pane-active-border-style "fg=#a7c7e7"
 T pane-border-status top
 # Each quarter's header: its role, what it's doing and its state.
-T pane-border-format "#{?pane_active,#[fg=#f5a623 bold],#[fg=#8b93a7]} #{?#{==:#{@role},orchestrator},◆ ORCHESTRATOR,#{?#{@role},● #{@label},#{@label}}} #[fg=#5c6477 nobold]· #{b:pane_current_path} #{?#{@task},#[fg=#c0c6d4]· #{@task} ,}#{?#{==:#{@state},working},#[fg=#e0af68]· working ,#{?#{==:#{@state},done},#[fg=#9ece6a]· done ✓ ,#{?#{==:#{@state},blocked},#[fg=#f7768e]· blocked ,#{?#{==:#{@state},asking},#[fg=#7dcfff]· has a question ,#{?#{==:#{@state},waiting},#[fg=#7dcfff]· waiting for approval ,#{?#{==:#{@state},needs-you},#[fg=#f7768e bold]· ⚠ NEEDS YOUR APPROVAL ,}}}}}}"
-T message-style "bg=#1d2230,fg=#f5a623"
+T pane-border-format "#{?pane_active,#[fg=#a7c7e7 bold],#[fg=#8b93a7]} #{?#{==:#{@role},orchestrator},◆ ORCHESTRATOR,#{?#{@role},● #{@label},#{@label}}} #[fg=#5c6477 nobold]· #{b:pane_current_path} #{?#{@task},#[fg=#c0c6d4]· #{@task} ,}#{?#{==:#{@state},working},#[fg=#ecdc98]· working ,#{?#{==:#{@state},done},#[fg=#9fdcb4]· done ✓ ,#{?#{==:#{@state},blocked},#[fg=#f2a7a7]· blocked ,#{?#{==:#{@state},asking},#[fg=#c4b5f4]· has a question ,#{?#{==:#{@state},waiting},#[fg=#c4b5f4]· waiting for approval ,#{?#{==:#{@state},needs-you},#[fg=#f2a7a7 bold]· ⚠ NEEDS YOUR APPROVAL ,}}}}}}"
+T message-style "bg=#1d2230,fg=#a7c7e7"
 T mode-style "bg=#2a3140,fg=#e6e9ef"
-T display-panes-active-colour "#f5a623"
+T display-panes-active-colour "#a7c7e7"
 T display-panes-colour "#5c6477"
 (( web )) && T pane-border-status off   # the browser draws its own headers
 
