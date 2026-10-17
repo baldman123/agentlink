@@ -185,7 +185,6 @@ export function CloudApp() {
             aria-expanded={callsOpen}
             aria-label={calls.pending ? `Calls, ${calls.pending} waiting` : "Calls"}
             onClick={() => setCallsOpen((o) => !o)}
-            data-calls-toggle
           >
             <svg viewBox="0 0 18 18" aria-hidden><path d="M3 3.5h12v8H9.5L6 14.5v-3H3z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" fill="none" /><path d="M9 6v2.6M9 10.4v.1" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
             Calls

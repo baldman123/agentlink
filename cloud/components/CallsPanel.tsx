@@ -254,8 +254,8 @@ function CallCard({ item, now, answer }: { item: CallItem; now: number; answer: 
   );
 }
 
-/** The popup under the Calls button. It floats over the page and closes on Close, Escape, or a click outside it;
- *  the buttons that toggle it carry data-calls-toggle so a click on them toggles instead of counting as outside. */
+/** The popup under the Calls button, over a dimmed backdrop. It closes on Close, Escape, or a click on the backdrop;
+ *  the backdrop takes that click, so it never reaches what's underneath. */
 export function CallsPanel({ calls, close }: { calls: Calls; close(): void }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -281,68 +281,61 @@ export function CallsPanel({ calls, close }: { calls: Calls; close(): void }) {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !e.defaultPrevented) dismiss();
     };
-    // a click outside closes it without pulling focus back, so the thing clicked keeps it
-    const onDown = (e: PointerEvent) => {
-      const t = e.target as Element | null;
-      if (!t || ref.current?.contains(t) || t.closest("[data-calls-toggle]")) return;
-      closeRef.current();
-    };
     document.addEventListener("keydown", onKey);
-    document.addEventListener("pointerdown", onDown);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.removeEventListener("pointerdown", onDown);
-    };
+    return () => document.removeEventListener("keydown", onKey);
   }, [dismiss]);
 
   return (
-    <section className="calls calls-pop" role="dialog" aria-label="Your calls" tabIndex={-1} ref={ref} data-testid="calls-pop">
-      <header className="calls-head">
-        <div className="ch-title">
-          <h2 className="ch-name" id="calls-h">
-            Your calls
-          </h2>
-          <div className="ch-task">{pending ? `${pending} waiting for your yes or no` : "Yes/no decisions your team needs from you"}</div>
-        </div>
-        <span className="grow" />
-        <button className="btn btn-ghost calls-close" onClick={dismiss}>
-          Close
-        </button>
-      </header>
-      <div className="calls-list">
-        {items === null ? (
-          failed ? (
-            <div className="empty" role="alert">
-              <strong>Can&apos;t load your calls.</strong>
-              <span>Check your connection, then try again.</span>
-              <button className="btn" onClick={calls.reload}>
-                Try again
-              </button>
+    <>
+      <div className="calls-backdrop" aria-hidden onClick={dismiss} data-testid="calls-backdrop" />
+      <section className="calls calls-pop" role="dialog" aria-label="Your calls" tabIndex={-1} ref={ref} data-testid="calls-pop">
+        <header className="calls-head">
+          <div className="ch-title">
+            <h2 className="ch-name" id="calls-h">
+              Your calls
+            </h2>
+            <div className="ch-task">{pending ? `${pending} waiting for your yes or no` : "Yes/no decisions your team needs from you"}</div>
+          </div>
+          <span className="grow" />
+          <button className="btn btn-ghost calls-close" onClick={dismiss}>
+            Close
+          </button>
+        </header>
+        <div className="calls-list">
+          {items === null ? (
+            failed ? (
+              <div className="empty" role="alert">
+                <strong>Can&apos;t load your calls.</strong>
+                <span>Check your connection, then try again.</span>
+                <button className="btn" onClick={calls.reload}>
+                  Try again
+                </button>
+              </div>
+            ) : (
+              <div className="skeleton" aria-busy="true">
+                <span style={{ width: "80%" }} />
+                <span style={{ width: "55%" }} />
+              </div>
+            )
+          ) : items.length === 0 ? (
+            <div className="empty calls-empty" data-testid="calls-empty">
+              <strong>Nothing needs you right now.</strong>
+              <span>When the boss needs a yes or no from you, the question shows up here.</span>
             </div>
           ) : (
-            <div className="skeleton" aria-busy="true">
-              <span style={{ width: "80%" }} />
-              <span style={{ width: "55%" }} />
-            </div>
-          )
-        ) : items.length === 0 ? (
-          <div className="empty calls-empty" data-testid="calls-empty">
-            <strong>Nothing needs you right now.</strong>
-            <span>When the boss needs a yes or no from you, the question shows up here.</span>
-          </div>
-        ) : (
-          <>
-            {failed && (
-              <div className="calls-stale" role="status">
-                Can&apos;t reach agentlink; this list may be out of date.
-              </div>
-            )}
-            {items.map((item) => (
-              <CallCard key={item.call.id} item={item} now={now} answer={calls.answer} />
-            ))}
-          </>
-        )}
-      </div>
-    </section>
+            <>
+              {failed && (
+                <div className="calls-stale" role="status">
+                  Can&apos;t reach agentlink; this list may be out of date.
+                </div>
+              )}
+              {items.map((item) => (
+                <CallCard key={item.call.id} item={item} now={now} answer={calls.answer} />
+              ))}
+            </>
+          )}
+        </div>
+      </section>
+    </>
   );
 }

@@ -277,11 +277,16 @@ test.describe("your calls", () => {
     await expect(btn).toBeFocused();
     await expect(btn).toHaveAttribute("aria-expanded", "false");
 
-    // a click outside closes it
+    // a click outside lands on the dimmed backdrop: it closes the popup and doesn't open the chat underneath
     await btn.click();
     await expect(pop).toBeVisible();
-    await page.mouse.click(centerBox.x + centerBox.width / 2, centerBox.y + centerBox.height - 120);
+    await expect(page.getByTestId("calls-backdrop")).toBeVisible();
+    const worker = (await page.locator(".chatlist").getByText("worker-1").boundingBox())!;
+    await page.mouse.click(worker.x + worker.width / 2, worker.y + worker.height / 2);
     await expect(pop).toHaveCount(0);
+    await expect(page.getByTestId("calls-backdrop")).toHaveCount(0);
+    await expect(center.locator(".center-head")).toContainText("orchestrator");
+    await expect(center.locator(".center-head")).not.toContainText("worker-1");
 
     // the button toggles it; a click inside doesn't close it
     await btn.click();
@@ -322,7 +327,13 @@ test.describe("your calls", () => {
         const p = (await pop.boundingBox())!;
         expect(p.x).toBeGreaterThanOrEqual(0);
         expect(p.x + p.width).toBeLessThanOrEqual(width);
-        await pop.evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished))); // fade-in done
+        if (width < 800) {
+          // on a phone it's a card, clearly smaller than the screen, with the page showing around it
+          const vh = page.viewportSize()!.height;
+          expect(p.width).toBeLessThanOrEqual(width - 32);
+          expect(p.height).toBeLessThanOrEqual(0.75 * vh);
+        }
+        await page.evaluate(() => Promise.all(document.getAnimations().filter((a) => a.effect?.getTiming().iterations !== Infinity).map((a) => a.finished))); // fade-ins done
         await page.screenshot({ path: `e2e/screenshots/calls-popup-${width}-${theme}.png` });
       }
     }
@@ -465,10 +476,13 @@ test.describe("phone @phone", () => {
     await expect(page.locator(".bosspanel")).toBeVisible(); // the pane underneath stays
     await card.getByText("Details").click();
     await noHorizontalScroll(page);
+    // a card clearly smaller than the screen, above the bottom tabs
+    const vp = page.viewportSize()!;
     const p = (await pop.boundingBox())!;
     const tabs = (await page.locator(".mtabs").boundingBox())!;
-    expect(p.x).toBeGreaterThanOrEqual(0);
-    expect(p.x + p.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    expect(p.x).toBeGreaterThanOrEqual(16);
+    expect(p.width).toBeLessThanOrEqual(vp.width - 32);
+    expect(p.height).toBeLessThanOrEqual(0.75 * vp.height);
     expect(p.y + p.height).toBeLessThanOrEqual(tabs.y);
     for (const b of [card.getByRole("button", { name: "Yes" }), card.getByRole("button", { name: "No" }), page.getByTestId("calls-btn"), tab]) {
       const box = (await b.boundingBox())!;
@@ -480,6 +494,13 @@ test.describe("phone @phone", () => {
     await page.screenshot({ path: "e2e/screenshots/phone-calls.png" });
     await card.getByRole("button", { name: "Yes" }).click();
     await expect(card.getByRole("status")).toContainText("Sending to your laptop");
+
+    // tapping the dimmed page closes it, and the tap doesn't reach the Chats tab underneath
+    const chats = (await page.locator(".mtabs").getByRole("tab", { name: /Chats/ }).boundingBox())!;
+    await page.touchscreen.tap(chats.x + chats.width / 2, chats.y + chats.height / 2);
+    await expect(pop).toHaveCount(0);
+    await expect(page.locator(".bosspanel")).toBeVisible();
+    await expect(page.locator(".chatlist")).toBeHidden();
   });
 
   test("admin works on a phone @phone", async ({ page }) => {

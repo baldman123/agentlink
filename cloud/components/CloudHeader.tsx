@@ -55,7 +55,6 @@ export function CloudHeader({
           aria-expanded={callsOpen}
           aria-label={calls ? `Your calls, ${calls} waiting` : "Your calls"}
           data-testid="calls-btn"
-          data-calls-toggle
         >
           <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
             <path d="M3 3.5h10v7H8.5L5.5 13v-2.5H3z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" fill="none" />
