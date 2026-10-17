@@ -13,7 +13,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Envelope, StoredMessage } from "../../contracts/index.ts";
 import { setDeps } from "../../cloud/lib/server/deps.ts";
-import { MemoryStore } from "../../cloud/test/memory-store.ts";
+import { MemoryFileStorage, MemoryStore } from "../../cloud/test/memory-store.ts";
 import { attachFakeRealtime, type FakeRealtime } from "./fake-realtime.ts";
 
 const API_DIR = path.resolve(import.meta.dirname, "../../cloud/app/api");
@@ -60,6 +60,8 @@ export interface LocalCloud {
   url: string;
   rt: FakeRealtime;
   store: RealtimeMemoryStore;
+  /** Storage for files, served on the same port at the signed URLs. */
+  files: MemoryFileStorage;
   /** Every API request the site answered: method, path, status. */
   requests: Array<{ method: string; path: string; status: number; user?: string }>;
   /** The owner invites a person; returns their access code. */
@@ -83,15 +85,18 @@ export async function startLocalCloud(opts: { owner?: string } = {}): Promise<Lo
     supabaseJwtSecret: "local-cloud-jwt-secret-".padEnd(48, "y"),
     hubName: "agentlink local cloud",
   };
+  const files = new MemoryFileStorage();
   setDeps({
     env,
     store,
     broadcaster: { send: async (topic, event, payload) => rt.broadcast(`realtime:${topic}`, event, payload as Record<string, unknown>) },
     now: () => Date.now(),
+    files,
   });
   const requests: LocalCloud["requests"] = [];
 
   async function handle(req: IncomingMessage, res: ServerResponse) {
+    if (await files.handle(req, res)) return; // the signed Storage URLs (uploads.md "Website")
     const url = new URL(req.url ?? "/", "http://local");
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
@@ -123,6 +128,7 @@ export async function startLocalCloud(opts: { owner?: string } = {}): Promise<Lo
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   env.supabaseUrl = url;
+  files.base = url;
 
   const call = async (method: string, p: string, bearer: string, body?: unknown) => {
     const r = await fetch(url + p, { method, headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -133,6 +139,7 @@ export async function startLocalCloud(opts: { owner?: string } = {}): Promise<Lo
     url,
     rt,
     store,
+    files,
     requests,
     async invite(user) {
       if (!ownerSession) {

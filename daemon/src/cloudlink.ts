@@ -2,10 +2,11 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { createClient, type RealtimeChannel, type SupabaseClient } from "@supabase/supabase-js";
 import { HEARTBEAT_INTERVAL_MS, HOP_LIMIT, type Envelope, type HubConnState, type InboxItem, type ScreenUpdate } from "../../contracts/index.ts";
-import { UPLOAD_ID_RE, sanitizeFileName, type Attachment } from "../../contracts/index.ts";
+import { SHA256_RE, UPLOAD_ID_RE, sanitizeFileName, type Attachment } from "../../contracts/index.ts";
 import type { Config } from "./config.ts";
 import type { HubTarget } from "./discovery.ts";
-import { attachmentsOf } from "./files.ts";
+import { attachmentsOf, crossesHub } from "./files.ts";
+import { PermanentFileError, getFromUrl, putToUrl } from "./hubfiles.ts";
 import { HubOffline } from "./hublink.ts";
 import { CloudInputGate } from "./cloudinput.ts";
 import type { InputChannel } from "./input.ts";
@@ -69,7 +70,7 @@ export class CloudLink extends EventEmitter implements DaemonHubLink {
   hubName: string | null = null;
   hubId: string | null = null;
   searching = false; // nothing to search for: the website has one address
-  readonly relaysFiles = false; // no file storage on the website yet (uploads.md "Website")
+  readonly relaysFiles = true; // through Storage with signed URLs (uploads.md "Website")
 
   private base: string;
   private session: string | null = null;
@@ -433,7 +434,12 @@ export class CloudLink extends EventEmitter implements DaemonHubLink {
       this.bumpSeq(d.seq);
       return;
     }
-    const stored: InboxItem | null = this.store.inboxInsert(this.localFiles(env));
+    const full = await this.fetchFiles(env);
+    if (!full) {
+      log("file.receive_deferred", { id: env.id, seq: d.seq });
+      return; // unacked: the next resume delivers it again
+    }
+    const stored: InboxItem | null = this.store.inboxInsert(full);
     logMsg("msg.received", env, { duplicate: !stored, remote: stored?.remote, seq: d.seq });
     await this.ack([env.id]);
     this.bumpSeq(d.seq);
@@ -445,19 +451,81 @@ export class CloudLink extends EventEmitter implements DaemonHubLink {
   }
 
   /**
-   * The website relays no file bytes yet (uploads.md "Website"): a file this laptop has (its own upload) gets its
-   * local path back; any other is marked as not available, with the reason.
+   * Uploads an outgoing envelope's files for another person: POST /api/files (reserve, same id as the local upload),
+   * PUT the bytes to the signed URL, POST complete. Remembered per file id, so a resend doesn't upload again.
    */
-  private localFiles(env: Envelope): Envelope {
+  private async sendFiles(env: Envelope): Promise<"ok" | "retry" | "dropped"> {
+    if (!crossesHub(env.to, this.cfg.user)) return "ok";
+    for (const a of attachmentsOf(env.body)) {
+      if (this.store.getKv(`cloudfile:${a.id}`)) continue;
+      try {
+        const local = this.store.uploadGet(a.id);
+        if (!local) throw new PermanentFileError(`${a.name} is no longer on this laptop`);
+        const made = await this.call("POST", "/api/files", { id: a.id, name: a.name, size: a.size, sha256: a.sha256, ...(a.mime ? { mime: a.mime } : {}) }, true);
+        if (made.status !== 201) {
+          const b = (made.body ?? {}) as { error?: string; detail?: string };
+          const why = `${a.name}: ${b.detail ?? b.error ?? `HTTP ${made.status}`}`;
+          if (made.status >= 500 || made.status === 401 || made.status === 429) throw new Error(why);
+          throw new PermanentFileError(why);
+        }
+        const url = (made.body as { upload_url: string | null }).upload_url;
+        if (url) {
+          await putToUrl(url, local.path, local.size, local.mime);
+          const done = await this.call("POST", `/api/files/${a.id}/complete`, undefined, true);
+          if (done.status !== 200) throw new Error(`${a.name}: complete answered ${done.status}`);
+        }
+        this.store.setKv(`cloudfile:${a.id}`, new Date().toISOString());
+        log("file.sent", { id: a.id, msg: env.id, size: a.size });
+      } catch (err) {
+        if (err instanceof PermanentFileError) {
+          this.onRejected(env, `not sent: ${err.message}`);
+          return "dropped";
+        }
+        log("file.send_failed", { msg: env.id, detail: String((err as Error)?.message ?? err) });
+        this.linkFailed("files", String((err as Error)?.message ?? err));
+        return "retry";
+      }
+    }
+    return "ok";
+  }
+
+  /**
+   * A delivered envelope's files onto this laptop: one it already has (its own upload) keeps its local path; any other
+   * is fetched with GET /api/files/:id and its signed URL, then checked (size, sha256). Null = a network failure: the
+   * delivery stays unacked and comes back on the next resume. A file that can't be had gets `error` instead of `path`.
+   */
+  private async fetchFiles(env: Envelope): Promise<Envelope | null> {
     const atts = attachmentsOf(env.body);
     if (!atts.length) return env;
-    const out = atts.map((a): Attachment => {
-      const local = typeof a.id === "string" && UPLOAD_ID_RE.test(a.id) ? this.store.uploadGet(a.id) : null;
+    const out: Attachment[] = [];
+    for (const a of atts) {
       const { path: _p, error: _e, ...meta } = a;
-      return local && local.sha256 === a.sha256
-        ? { ...meta, path: local.path }
-        : { ...meta, name: sanitizeFileName(String(a.name ?? "file")), error: "file uploads through the website need storage set up; see SETUP.md" };
-    });
+      if (typeof a.id !== "string" || !UPLOAD_ID_RE.test(a.id) || typeof a.sha256 !== "string" || !SHA256_RE.test(a.sha256) || !Number.isInteger(a.size)) {
+        out.push({ id: String(a.id ?? "").slice(0, 64), name: sanitizeFileName(String(a.name ?? "file")), size: 0, sha256: "", error: "malformed attachment" });
+        continue;
+      }
+      meta.name = sanitizeFileName(String(a.name ?? "file"));
+      const local = this.store.uploadGet(a.id);
+      if (local && local.sha256 === a.sha256) {
+        out.push({ ...meta, path: local.path });
+        continue;
+      }
+      try {
+        const r = await this.call("GET", `/api/files/${a.id}`, undefined, true);
+        if (r.status >= 500 || r.status === 401 || r.status === 429) return null;
+        if (r.status !== 200) {
+          const b = (r.body ?? {}) as { error?: string; detail?: string };
+          out.push({ ...meta, error: b.detail ?? b.error ?? `HTTP ${r.status}` });
+          continue;
+        }
+        const p = await getFromUrl((r.body as { url: string }).url, meta, this.store, this.cfg.uploadsDir);
+        log("file.received", { id: a.id, msg: env.id, size: a.size });
+        out.push({ ...meta, path: p });
+      } catch (err) {
+        if (!(err instanceof PermanentFileError)) return null;
+        out.push({ ...meta, error: err.message });
+      }
+    }
     return { ...env, body: { ...(env.body as object), attachments: out } };
   }
 
@@ -487,6 +555,10 @@ export class CloudLink extends EventEmitter implements DaemonHubLink {
       const attempts = item.attempts + 1;
       const wait = Math.min(RESEND_MAX_MS, RESEND_AFTER_MS * 2 ** (attempts - 1));
       this.store.markAttempt(item.envelope.id, attempts, new Date(Date.now() + wait).toISOString(), attempts > 1 ? "not accepted yet, resent" : null);
+      // files for another person go to Storage first (uploads.md "Website")
+      const files = await this.sendFiles(item.envelope);
+      if (files === "retry") return; // stays in the outbox, in order
+      if (files === "dropped") continue;
       logMsg("msg.sent", item.envelope, { attempt: attempts });
       let r: { status: number; body: unknown };
       try {

@@ -2,7 +2,9 @@
 import type { ContextEntry, Envelope, StoredMessage } from "../../contracts/index.ts";
 import type { ClaudeUsage, UsageRow } from "../../contracts/usage.ts";
 import type { Call, CallAnswer, CallUpload } from "../../contracts/calls.ts";
-import type { Broadcaster, DeliveryRow, MessageQuery, PaneInputRow, PersonRow, SessionRow, Store } from "../lib/server/store.ts";
+import { randomUUID } from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Broadcaster, DeliveryRow, FileRow, FileStorage, MessageQuery, PaneInputRow, PersonRow, SessionRow, Store } from "../lib/server/store.ts";
 
 const userOf = (a: string) => a.split("/")[0];
 const iso = () => new Date().toISOString();
@@ -186,6 +188,92 @@ export class MemoryStore implements Store {
     Object.assign(c, { state: "answering", answer, answered_at: iso() });
     const { user: _u, ...call } = c;
     return { ok: true as const, call };
+  }
+
+  files = new Map<string, FileRow>();
+  async createFile(row: FileRow) {
+    if (this.files.has(row.id)) return false;
+    this.files.set(row.id, { ...row, recipients: [...row.recipients] });
+    return true;
+  }
+  async getFile(id: string) {
+    const f = this.files.get(id);
+    return f ? { ...f, recipients: [...f.recipients] } : null;
+  }
+  async markFileUploaded(id: string, at: string) {
+    const f = this.files.get(id);
+    if (f) f.uploaded_at = at;
+  }
+  async addFileRecipients(ids: string[], recipients: string[]) {
+    for (const id of ids) {
+      const f = this.files.get(id);
+      if (f) f.recipients = [...new Set([...f.recipients, ...recipients])].sort();
+    }
+  }
+  async expiredFiles(nowIso: string, limit: number) {
+    return [...this.files.values()].filter((f) => f.expires_at < nowIso).sort((a, b) => a.expires_at.localeCompare(b.expires_at)).slice(0, limit);
+  }
+  async deleteFiles(ids: string[]) {
+    for (const id of ids) this.files.delete(id);
+  }
+}
+
+/**
+ * Storage in memory, with signed URLs that a plain http server can answer through handle(): PUT to the upload URL
+ * stores the bytes, GET on the download URL returns them. Tokens are single-path and checked like Supabase's.
+ */
+export class MemoryFileStorage implements FileStorage {
+  objects = new Map<string, Buffer>();
+  private tokens = new Map<string, { path: string; kind: "upload" | "download"; until: number }>();
+  /** Where handle() is reachable, e.g. http://127.0.0.1:1234; URLs are built on it. */
+  base = "http://storage.invalid";
+
+  private sign(path: string, kind: "upload" | "download", seconds: number): string {
+    const token = randomUUID();
+    this.tokens.set(token, { path, kind, until: Date.now() + seconds * 1000 });
+    return `${this.base}/storage/v1/object/${kind === "upload" ? "upload/sign" : "sign"}/test-bucket/${path}?token=${token}`;
+  }
+  async signedUploadUrl(path: string) {
+    return this.sign(path, "upload", 7200);
+  }
+  async signedDownloadUrl(path: string, seconds: number) {
+    return this.sign(path, "download", seconds);
+  }
+  async size(path: string) {
+    return this.objects.get(path)?.length ?? null;
+  }
+  async remove(paths: string[]) {
+    for (const p of paths) this.objects.delete(p);
+  }
+
+  /** Serves the signed URLs. Returns false when the request isn't a storage URL. */
+  async handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+    const url = new URL(req.url ?? "/", "http://x");
+    const m = url.pathname.match(/^\/storage\/v1\/object\/(upload\/sign|sign)\/test-bucket\/(.+)$/);
+    if (!m) return false;
+    const t = this.tokens.get(url.searchParams.get("token") ?? "");
+    const kind = m[1] === "upload/sign" ? "upload" : "download";
+    const cors = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, OPTIONS", "access-control-allow-headers": "*" };
+    if (req.method === "OPTIONS") return void res.writeHead(204, cors).end(), true;
+    if (!t || t.kind !== kind || t.path !== decodeURIComponent(m[2]) || Date.now() > t.until) {
+      res.writeHead(400, { ...cors, "content-type": "application/json" }).end(JSON.stringify({ error: "InvalidJWT" }));
+      return true;
+    }
+    if (kind === "upload" && req.method === "PUT") {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      this.objects.set(t.path, Buffer.concat(chunks));
+      res.writeHead(200, { ...cors, "content-type": "application/json" }).end(JSON.stringify({ Key: `test-bucket/${t.path}` }));
+      return true;
+    }
+    if (kind === "download" && req.method === "GET") {
+      const body = this.objects.get(t.path);
+      if (!body) return void res.writeHead(404, cors).end(), true;
+      res.writeHead(200, { ...cors, "content-type": "application/octet-stream", "content-length": String(body.length) }).end(body);
+      return true;
+    }
+    res.writeHead(405, cors).end();
+    return true;
   }
 }
 

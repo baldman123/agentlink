@@ -9,7 +9,9 @@ import type {
   ServerFrame,
   Session,
   StoredMessage,
+  CloudFileCreated,
   UiBootstrap,
+  UploadResult,
   UserPresence,
 } from "../../../contracts/index.ts";
 import { UploadUnavailable, type ConnectHandlers, type ContextPutResult, type MessageQuery, type PaneInputResponse, type PaneInputStatus, type Transport } from "../../../ui/src/lib.ts";
@@ -97,6 +99,7 @@ export function withPresence(users: UserPresence[], online: Set<string> | null):
 
 export function cloudTransport(): Transport & { me(): Me | null } {
   let me: Me | null = null;
+  const uploaded = new Map<string, UploadResult>(); // files reserved and uploaded from this page, by id
   let live: Live | null = null;
   let seq = 0;
   let screenSubs: Address[] = [];
@@ -265,10 +268,13 @@ export function cloudTransport(): Transport & { me(): Me | null } {
     },
 
     async send(req) {
+      // files ride in body.attachments, as on the LAN path (the server rewrites them from its own rows)
+      const files = (req.attachments ?? []).map((id) => uploaded.get(id)).filter((u): u is UploadResult => !!u).map(({ path: _p, created_at: _c, ...a }) => a);
+      const body = files.length ? { ...(typeof req.body === "string" ? { text: req.body } : req.body), attachments: files } : req.body;
       try {
         const r = await api<{ id: string }>("/api/messages", {
           method: "POST",
-          json: { to: req.to, type: req.type, body: req.body, reply_to: req.reply_to ?? null, from_agent: req.from_agent ?? "human" },
+          json: { to: req.to, type: req.type, body, reply_to: req.reply_to ?? null, from_agent: req.from_agent ?? "human" },
         });
         return { id: r.id, queued: true };
       } catch (e) {
@@ -323,11 +329,41 @@ export function cloudTransport(): Transport & { me(): Me | null } {
     async health() {
       return null; // no local daemon on the website
     },
-    async upload() {
-      // the page can't reach the laptop's daemon from https, and the website has no file storage yet (uploads.md "Website")
-      throw new UploadUnavailable("File uploads through the website need storage set up; see SETUP.md. The app on your laptop (http://127.0.0.1:7780) can send files.");
+    async upload(file, name, onProgress, signal) {
+      // uploads.md "Website": hash here, reserve the file, PUT the bytes straight to Storage, then confirm
+      const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer()))].map((b) => b.toString(16).padStart(2, "0")).join("");
+      if (signal.aborted) throw new DOMException("upload cancelled", "AbortError");
+      let made: CloudFileCreated;
+      try {
+        made = await api<CloudFileCreated>("/api/files", { method: "POST", json: { name, size: file.size, sha256, ...(file.type ? { mime: file.type } : {}) } });
+      } catch (e) {
+        if (e instanceof ApiError && e.signedOut) fail(e);
+        if (e instanceof ApiError && e.code === "config") throw new UploadUnavailable("File uploads through the website need storage set up; see SETUP.md.");
+        throw e;
+      }
+      if (made.upload_url) {
+        const url = made.upload_url;
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("PUT", url);
+          xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+          xhr.setRequestHeader("x-upsert", "true");
+          xhr.upload.onprogress = (e) => onProgress(e.loaded);
+          xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`storage answered ${xhr.status}`)));
+          xhr.onerror = () => reject(new Error("can't reach file storage"));
+          xhr.onabort = () => reject(new DOMException("upload cancelled", "AbortError"));
+          signal.addEventListener("abort", () => xhr.abort(), { once: true });
+          xhr.send(file);
+        });
+        await api(`/api/files/${made.id}/complete`, { method: "POST" });
+      }
+      const result: UploadResult = { id: made.id, name: made.name, size: file.size, sha256, path: "", created_at: new Date().toISOString(), ...(file.type ? { mime: file.type } : {}) };
+      uploaded.set(made.id, result);
+      return result;
     },
-    async deleteUpload() {},
+    async deleteUpload(id) {
+      uploaded.delete(id); // the row and bytes expire with the rest after 7 days
+    },
   };
 }
 

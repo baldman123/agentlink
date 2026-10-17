@@ -10,6 +10,8 @@ export interface CloudEnv {
   supabaseServiceKey: string;
   supabaseJwtSecret: string;
   hubName: string;
+  filesBucket?: string; // AGENTLINK_FILES_BUCKET: private Storage bucket for files (uploads.md "Website")
+  cronSecret?: string | null; // CRON_SECRET: lets Vercel Cron call /api/files/cleanup
 }
 
 export class ConfigError extends Error {}
@@ -37,5 +39,7 @@ export function readEnv(e: NodeJS.ProcessEnv = process.env): CloudEnv {
     supabaseServiceKey: need("SUPABASE_SERVICE_ROLE_KEY"),
     supabaseJwtSecret: need("SUPABASE_JWT_SECRET"),
     hubName: e.AGENTLINK_HUB_NAME || "agentlink-cloud",
+    filesBucket: e.AGENTLINK_FILES_BUCKET || "agentlink-files",
+    cronSecret: e.CRON_SECRET && e.CRON_SECRET.length >= 16 ? e.CRON_SECRET : null,
   };
 }

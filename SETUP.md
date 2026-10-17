@@ -172,20 +172,21 @@ What the agent gets is the file on its own laptop plus a line `[attached: /full/
 
 - To your own agents and panes, a file can be up to 2 GB. It never leaves your laptop.
 - To another person's agents over the LAN hub, a file can be up to 200 MB. Your daemon sends it to the hub first, their daemon downloads it and checks every byte (sha256), and only then does the message reach their pane. The hub deletes its copy after 7 days.
-- Through the website (cloud mode), files to other people don't work yet; see the next section. Files to your own agents still work from the app on your laptop.
+- Through the website (cloud mode), a file can also be up to 200 MB. It goes to the website's private file storage and from there to the other person's daemon, which checks every byte the same way. The website keeps it 7 days.
 
 A file from someone else is shown to the agent like the rest of their message: as an untrusted request. Its name is cleaned up first so it can't fake a command or a path.
 
 ### Files through the website
 
-The website has nowhere to keep a file between two laptops, so for now it refuses with "File uploads through the website need storage set up; see SETUP.md". The website's own chat box shows the same message, because a page on `https://` can't reach the daemon on your laptop. Use the app on your laptop (`http://127.0.0.1:7780`) for files to your own agents.
+The website's chat box, the boss panel and the app on your laptop all take files. The bytes go straight from the browser or daemon to a private Supabase Storage bucket through a short-lived signed URL, never through the website's server, so Vercel's request limits don't apply. A file can be read by the person who sent it and the people it was sent to; anyone else gets "not found".
 
-Relaying files through the website needs two things, and neither exists yet:
+Setting it up is the owner's job, once per website:
 
-1. A private Supabase Storage bucket, for example `agentlink-files`, readable and writable only with the service role key (no public access, no policies for `anon` or `authenticated`). The owner creates it in the Supabase dashboard, under Storage.
-2. Code: API routes that hand a daemon a signed upload URL for a file it sends and a signed download URL for a file addressed to its user, a `files` table (id, uploader, to, name, size, sha256, created_at) in a new migration, and a cleanup job. The daemon side would then use the same order as on the LAN hub. The planned setting is `AGENTLINK_FILES_BUCKET=agentlink-files` (listed, commented out, in `cloud/.env.example`); nothing reads it yet.
+1. Apply the migration `cloud/supabase/migrations/20261018000000_files.sql` (for example `supabase db push` from `cloud/` with the project linked). It creates the `files` table and the private bucket `agentlink-files`: 200 MB per file, any type, no public access and no client policies.
+2. On Vercel, set `AGENTLINK_FILES_BUCKET=agentlink-files` (that is also the default) and redeploy.
+3. Optional: set `CRON_SECRET` (16 or more characters) and add a Vercel Cron for `GET /api/files/cleanup`. Without it, expired files are removed a few at a time whenever someone uploads, and the owner can run the cleanup with `POST /api/files/cleanup`.
 
-Until both are done, nothing about files touches the live website, its database or its storage.
+If storage isn't set up, uploads on the website fail with a message pointing here, and nothing else changes.
 
 ## Troubleshooting
 

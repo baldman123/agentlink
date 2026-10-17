@@ -4,7 +4,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { ContextEntry, Envelope, StoredMessage } from "../../../contracts/index.ts";
 import type { ClaudeUsage, UsageRow } from "../../../contracts/usage.ts";
 import type { Call, CallAnswer, CallUpload } from "../../../contracts/calls.ts";
-import type { Broadcaster, DeliveryRow, MessageQuery, PaneInputRow, PersonRow, SessionRow, Store } from "./store.ts";
+import type { Broadcaster, DeliveryRow, FileRow, FileStorage, MessageQuery, PaneInputRow, PersonRow, SessionRow, Store } from "./store.ts";
 
 type Row = Record<string, any>;
 
@@ -236,6 +236,70 @@ export class SupabaseStore implements Store {
     if (rows.length) return { ok: true as const, call: toCall(rows[0]) };
     const exists = must(await this.db.from("calls").select("id").eq("username", user).eq("id", id).maybeSingle(), "answerCall");
     return { ok: false as const, reason: exists ? ("already_answered" as const) : ("not_found" as const) };
+  }
+
+  // ---- files (uploads.md "Website")
+  async createFile(row: FileRow) {
+    const r = await this.db.from("files").insert(row);
+    if (r.error?.code === "23505") return false; // unique violation: the id is taken
+    must(r, "createFile");
+    return true;
+  }
+
+  async getFile(id: string) {
+    return must(await this.db.from("files").select("*").eq("id", id).maybeSingle(), "getFile") as FileRow | null;
+  }
+
+  async markFileUploaded(id: string, at: string) {
+    must(await this.db.from("files").update({ uploaded_at: at }).eq("id", id), "markFileUploaded");
+  }
+
+  async addFileRecipients(ids: string[], recipients: string[]) {
+    if (!ids.length || !recipients.length) return;
+    must(await this.db.rpc("agentlink_add_file_recipients", { p_ids: ids, p_recipients: recipients }), "addFileRecipients");
+  }
+
+  async expiredFiles(nowIso: string, limit: number) {
+    return must(await this.db.from("files").select("*").lt("expires_at", nowIso).order("expires_at").limit(limit), "expiredFiles") as FileRow[];
+  }
+
+  async deleteFiles(ids: string[]) {
+    if (ids.length) must(await this.db.from("files").delete().in("id", ids), "deleteFiles");
+  }
+}
+
+/** The private Storage bucket, as the service role. Signed URLs let clients move bytes without the API in between. */
+export class SupabaseFileStorage implements FileStorage {
+  private db: SupabaseClient;
+
+  constructor(url: string, serviceKey: string, private bucket: string) {
+    this.db = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  }
+
+  private get b() {
+    return this.db.storage.from(this.bucket);
+  }
+
+  async signedUploadUrl(path: string) {
+    // upsert: a retried upload of the same reserved file may replace a partial one
+    return (must(await this.b.createSignedUploadUrl(path, { upsert: true }), "signedUploadUrl") as { signedUrl: string }).signedUrl;
+  }
+
+  async signedDownloadUrl(path: string, seconds: number) {
+    return (must(await this.b.createSignedUrl(path, seconds), "signedDownloadUrl") as { signedUrl: string }).signedUrl;
+  }
+
+  async size(path: string) {
+    const slash = path.lastIndexOf("/");
+    const dir = path.slice(0, slash);
+    const name = path.slice(slash + 1);
+    const list = must(await this.b.list(dir, { search: name, limit: 100 }), "size") as { name: string; metadata: { size?: number } | null }[];
+    const hit = list.find((o) => o.name === name);
+    return hit ? Number(hit.metadata?.size ?? 0) : null;
+  }
+
+  async remove(paths: string[]) {
+    if (paths.length) must(await this.b.remove(paths), "remove");
   }
 }
 

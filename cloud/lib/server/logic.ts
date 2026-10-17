@@ -2,6 +2,7 @@
 // presence, and the context_update fan-out.
 import { ADDRESS_RE, HOP_LIMIT, SESSION_TIMEOUT_MS, type Envelope, type MessageType, type StoredMessage, type UserPresence } from "../../../contracts/index.ts";
 import type { Deps } from "./deps.ts";
+import { checkAttachments } from "./files.ts";
 import { mintRealtimeJwt, mintSession, safeEqual, sha256hex } from "./crypto.ts";
 import { HttpError, log, USER_RE } from "./http.ts";
 import type { PersonRow, SessionRow } from "./store.ts";
@@ -73,7 +74,7 @@ const userOf = (addr: string) => addr.split("/")[0];
 const isAgentAddress = (a: unknown): a is string => typeof a === "string" && ADDRESS_RE.test(a) && !a.endsWith("/*");
 const isTarget = (a: unknown): a is string => a === "*" || (typeof a === "string" && ADDRESS_RE.test(a));
 
-export type Rejection = "hop_limit" | "bad_address" | "bad_envelope" | "from_mismatch" | "unknown_target";
+export type Rejection = "hop_limit" | "bad_address" | "bad_envelope" | "from_mismatch" | "unknown_target" | "bad_attachment";
 
 /** Builds the envelope for the browser form of POST /api/messages. */
 export function envelopeFromForm(user: string, b: any, now: number): Envelope {
@@ -111,7 +112,7 @@ async function activeUsers(d: Deps): Promise<string[]> {
 export async function acceptEnvelope(d: Deps, caller: string, raw: any): Promise<{ id: string; accepted: true } | { id: string; rejected: true; reason: Rejection }> {
   const id = typeof raw?.id === "string" ? raw.id : "";
   if (!shapeOk(raw)) return { id, rejected: true, reason: "bad_envelope" };
-  const env: Envelope = { id: raw.id, from: raw.from, to: raw.to, reply_to: raw.reply_to ?? null, hops: raw.hops, type: raw.type, body: raw.body, timestamp: raw.timestamp };
+  let env: Envelope = { id: raw.id, from: raw.from, to: raw.to, reply_to: raw.reply_to ?? null, hops: raw.hops, type: raw.type, body: raw.body, timestamp: raw.timestamp };
 
   const existing = await d.store.getMessage(env.id);
   if (existing) {
@@ -130,6 +131,16 @@ export async function acceptEnvelope(d: Deps, caller: string, raw: any): Promise
     if (!active.includes(target)) return { id, rejected: true, reason: "unknown_target" };
     recipients = [target];
   }
+
+  // Files (uploads.md "Website"): only the sender's own finished uploads, rewritten from the rows. Readers are added
+  // before the message is stored, so a recipient can always fetch what its delivery names.
+  const files = await checkAttachments(d, caller, env);
+  if ("refused" in files) {
+    log("msg.rejected", { id, from: env.from, to: env.to, reason: files.refused });
+    return { id, rejected: true, reason: "bad_attachment" };
+  }
+  env = files.env;
+  if (files.fileIds.length) await d.store.addFileRecipients(files.fileIds, env.to === "*" ? ["*"] : recipients);
 
   const now = new Date(d.now()).toISOString();
   const base: StoredMessage = { ...env, state: "accepted", accepted_at: now, delivered_at: null, drop_reason: null };
