@@ -367,8 +367,10 @@ const readBody = (req, cb) => {
 const online = (id) => [...sockets].some((ws) => ws.c4who.person?.id === id);
 
 // ---- uploads: files dropped, pasted or picked on the page ----
-// Each one is streamed to ~/.claude4/<session>/uploads/<yyyymmdd-hhmmss>-<name>, then its path is pasted
-// (bracketed, no Enter) into the pane's input, so the person can keep typing around it.
+// Each one is streamed to ~/.claude4/uploads/<session>/<yyyymmdd-hhmmss>-<name>, then its path is pasted
+// (bracketed, no Enter) into the pane's input, so the person can keep typing around it. Uploads live
+// outside ~/.claude4/<session>/ because claude4 wipes that folder on every start, and the paths stay in
+// the Claudes' conversations.
 const UPLOAD_MAX = Number(process.env.C4_UPLOAD_MAX || 2 * 1024 ** 3);
 // The last path segment only, no control characters, no leading dots (so no "." or ".."), extension kept.
 function safeName(raw) {
@@ -411,7 +413,7 @@ async function upload(req, res, url, who, session) {
   if (len > UPLOAD_MAX) return refuse(413, `Too big: the limit is ${UPLOAD_MAX >= 1024 ** 3 ? `${+(UPLOAD_MAX / 1024 ** 3).toFixed(1)} GB` : `${Math.round(UPLOAD_MAX / 1024 ** 2)} MB`}.`);
   const pane = await paneOf(session, slot);
   if (!pane) return refuse(404, "That pane isn't running.");
-  const dir = path.join(STATE_ROOT, session, "uploads");
+  const dir = path.join(STATE_ROOT, "uploads", session);
   const name = safeName(url.searchParams.get("name"));
   let file, fd;
   try {
