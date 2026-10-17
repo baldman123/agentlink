@@ -99,7 +99,8 @@ export function bodyPreview(b: string | RichBody): string {
   return "";
 }
 
-const USER_HUES = ["#3FB8AF", "#9B87F5", "#E5739A", "#5AA9E6", "#9CC56A", "#E8845C", "#C792EA", "#4DB6E8"];
+// pastels, all far enough apart to tell people apart: teal, lavender, pink, blue, lime, butter, orchid, rose
+const USER_HUES = ["#9FD8D2", "#C3B5F4", "#F4B8D0", "#A7C7E7", "#C2E0A0", "#EFE2A2", "#DEB5EC", "#F2B0AB"];
 export function userColor(user: string): string {
   let h = 0;
   for (const ch of user) h = (h * 31 + ch.charCodeAt(0)) >>> 0;

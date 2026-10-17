@@ -33,7 +33,7 @@ export const USAGE_INTERVAL_MS = 5 * 60_000;
 /** Older than this, the UI greys the meter out: the daemon stopped reporting. */
 export const USAGE_STALE_MS = 20 * 60_000;
 
-/** Meter colours: amber from 75% used, red from 90%. */
+/** Meter colours: yellow from 75% used, red from 90%. */
 export const USAGE_WARN_PCT = 75;
 export const USAGE_DANGER_PCT = 90;
 

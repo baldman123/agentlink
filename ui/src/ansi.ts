@@ -18,10 +18,10 @@ export interface Segment {
 }
 export type Line = Segment[];
 
-// xterm-ish palette tuned for a dark navy background
+// xterm-ish palette in pastels, tuned for the near-black terminal background
 export const PALETTE16 = [
-  "#1b1f2a", "#e5534b", "#57ab5a", "#c69026", "#539bf5", "#b083f0", "#39c5cf", "#c9d1d9",
-  "#636e7b", "#ff7b72", "#7ee787", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#f0f6fc",
+  "#1c2028", "#f2a7a7", "#a8dcb8", "#ecdc98", "#a7c7e7", "#cbb6f2", "#9fd8d2", "#d6dde8",
+  "#6a7383", "#f7bcbc", "#bfe8cb", "#f5ebb8", "#c0d8f0", "#dccbf7", "#b8e5e0", "#f4f7fb",
 ];
 
 function color256(n: number): string | undefined {

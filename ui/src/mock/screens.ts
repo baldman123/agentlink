@@ -11,7 +11,7 @@ const BOLD = `${E}1m`;
 const DIM = `${E}2m`;
 const ITAL = `${E}3m`;
 const INV = `${E}7m`;
-const CLAUDE = rgb(215, 119, 87); // Claude orange
+const CLAUDE = rgb(167, 199, 231); // the site's pastel blue (stands in for Claude's own colour)
 const OK = `${E}38;5;114m`;
 const GREY = `${E}38;5;245m`;
 const BLUE = `${E}94m`;
@@ -24,8 +24,8 @@ type Chunk = (task: string) => string[];
 const bullet = (s: string) => `${OK}●${R} ${s}`;
 const tool = (name: string, arg: string) => `${OK}●${R} ${BOLD}${name}${R}(${arg})`;
 const out = (s: string) => `  ${GREY}⎿${R}  ${s}`;
-const diffDel = (n: number, s: string) => `      ${GREY}${String(n).padStart(3)}${R} ${bgRgb(78, 30, 36)}${rgb(255, 170, 170)}-  ${s.padEnd(64)}${R}`;
-const diffAdd = (n: number, s: string) => `      ${GREY}${String(n).padStart(3)}${R} ${bgRgb(26, 64, 38)}${rgb(170, 240, 180)}+  ${s.padEnd(64)}${R}`;
+const diffDel = (n: number, s: string) => `      ${GREY}${String(n).padStart(3)}${R} ${bgRgb(58, 30, 36)}${rgb(242, 167, 167)}-  ${s.padEnd(64)}${R}`;
+const diffAdd = (n: number, s: string) => `      ${GREY}${String(n).padStart(3)}${R} ${bgRgb(24, 50, 36)}${rgb(159, 220, 180)}+  ${s.padEnd(64)}${R}`;
 const ctx = (n: number, s: string) => `      ${GREY}${String(n).padStart(3)}${R}    ${s}`;
 
 const CHUNKS: Chunk[] = [

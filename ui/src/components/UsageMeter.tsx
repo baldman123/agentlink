@@ -1,5 +1,5 @@
 // Claude plan usage for one person: the 5-hour session limit and the weekly limit (plus any per-model weekly
-// limit, e.g. Opus), each as a thin bar with % used and time to reset. Bars go amber at 75% and red at 90%.
+// limit, e.g. Opus), each as a thin bar with % used and time to reset. Bars go yellow at 75% and red at 90%.
 // Data: GET /api/usage on the website (contracts/usage.ts), polled once a minute and shared by every meter on
 // the page. Where that route doesn't exist (the LAN UI) the meter renders nothing.
 import { useEffect, useState } from "react";
@@ -61,7 +61,7 @@ export function useUsage(user: string): ClaudeUsage | null {
   return u;
 }
 
-const FILL = { ok: "var(--idle)", warn: "var(--accent)", danger: "var(--error)" } as const;
+const FILL = { ok: "var(--idle)", warn: "var(--warn)", danger: "var(--error)" } as const;
 
 // ---------------------------------------------------------------- view
 

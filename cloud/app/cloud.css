@@ -207,8 +207,7 @@
 /* the anchor is its own layer above the page: the backdrop (z -1) dims everything else, the Calls button stays on top
    of it so it still toggles, and the popup sits over both */
 .calls-anchor { position: relative; z-index: 26; display: inline-flex; flex: none; }
-.calls-backdrop { position: fixed; inset: 0; z-index: -1; background: rgba(5, 7, 10, 0.5); animation: fade 0.12s; }
-:root[data-theme="light"] .calls-backdrop { background: rgba(23, 26, 33, 0.28); }
+.calls-backdrop { position: fixed; inset: 0; z-index: -1; background: var(--scrim); animation: fade 0.12s; }
 .calls-pop {
   position: absolute; top: calc(100% + 9px); right: 0; z-index: 1;
   width: min(460px, calc(100vw - 32px)); max-height: min(680px, calc(100dvh - 72px));
@@ -251,8 +250,8 @@
 .call-why { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
 .call-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 4px; }
 .call-btn { height: 48px; font-size: 16px; border-radius: 10px; }
-.call-yes { background: var(--idle); border-color: var(--idle); color: #06140c; }
-.call-yes:hover:not(:disabled) { filter: brightness(1.07); border-color: var(--idle); }
+.call-yes { background: var(--idle-fill); border-color: var(--idle-fill); color: var(--accent-ink); }
+.call-yes:hover:not(:disabled) { filter: brightness(1.05); border-color: var(--idle-fill); }
 .call-no { color: var(--error); border-color: color-mix(in srgb, var(--error) 55%, transparent); background: var(--raised); }
 .call-no:hover:not(:disabled) { border-color: var(--error); }
 .call-btn:disabled { opacity: 0.35; }

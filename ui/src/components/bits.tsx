@@ -49,7 +49,7 @@ export function Addr({ a, me }: { a: Address; me?: string | null }) {
   const ag = agentOf(a);
   return (
     <span className="addr">
-      <span className="addr-user" style={{ color: userColor(u) }}>{u}</span>
+      <span className="addr-user" style={{ "--u": userColor(u) } as React.CSSProperties}>{u}</span>
       <span className="addr-sep">/</span>
       <span className="addr-agent">{ag === "*" ? "all agents" : ag}</span>
     </span>
