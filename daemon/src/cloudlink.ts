@@ -2,8 +2,10 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { createClient, type RealtimeChannel, type SupabaseClient } from "@supabase/supabase-js";
 import { HEARTBEAT_INTERVAL_MS, HOP_LIMIT, type Envelope, type HubConnState, type InboxItem, type ScreenUpdate } from "../../contracts/index.ts";
+import { UPLOAD_ID_RE, sanitizeFileName, type Attachment } from "../../contracts/index.ts";
 import type { Config } from "./config.ts";
 import type { HubTarget } from "./discovery.ts";
+import { attachmentsOf } from "./files.ts";
 import { HubOffline } from "./hublink.ts";
 import { CloudInputGate } from "./cloudinput.ts";
 import type { InputChannel } from "./input.ts";
@@ -67,6 +69,7 @@ export class CloudLink extends EventEmitter implements DaemonHubLink {
   hubName: string | null = null;
   hubId: string | null = null;
   searching = false; // nothing to search for: the website has one address
+  readonly relaysFiles = false; // no file storage on the website yet (uploads.md "Website")
 
   private base: string;
   private session: string | null = null;
@@ -430,7 +433,7 @@ export class CloudLink extends EventEmitter implements DaemonHubLink {
       this.bumpSeq(d.seq);
       return;
     }
-    const stored: InboxItem | null = this.store.inboxInsert(env);
+    const stored: InboxItem | null = this.store.inboxInsert(this.localFiles(env));
     logMsg("msg.received", env, { duplicate: !stored, remote: stored?.remote, seq: d.seq });
     await this.ack([env.id]);
     this.bumpSeq(d.seq);
@@ -439,6 +442,23 @@ export class CloudLink extends EventEmitter implements DaemonHubLink {
       if (agent && agent !== "*") this.store.sessionTouch(agent);
       this.emit("inbox", stored);
     }
+  }
+
+  /**
+   * The website relays no file bytes yet (uploads.md "Website"): a file this laptop has (its own upload) gets its
+   * local path back; any other is marked as not available, with the reason.
+   */
+  private localFiles(env: Envelope): Envelope {
+    const atts = attachmentsOf(env.body);
+    if (!atts.length) return env;
+    const out = atts.map((a): Attachment => {
+      const local = typeof a.id === "string" && UPLOAD_ID_RE.test(a.id) ? this.store.uploadGet(a.id) : null;
+      const { path: _p, error: _e, ...meta } = a;
+      return local && local.sha256 === a.sha256
+        ? { ...meta, path: local.path }
+        : { ...meta, name: sanitizeFileName(String(a.name ?? "file")), error: "file uploads through the website need storage set up; see SETUP.md" };
+    });
+    return { ...env, body: { ...(env.body as object), attachments: out } };
   }
 
   private async ack(ids: string[]) {

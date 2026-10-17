@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import {
@@ -14,7 +15,10 @@ import {
   type SessionStatus,
   type UiBootstrap,
 } from "../../contracts/index.ts";
+import { UPLOAD_ID_RE, UPLOAD_MAX_LOCAL_BYTES, formatBytes } from "../../contracts/index.ts";
+import { UploadMismatch, UploadTooLarge } from "../../contracts/uploads-node.ts";
 import type { Config } from "./config.ts";
+import { AttachmentError, crossesHub, resolveAttachments, storeFile } from "./files.ts";
 import { HubOffline } from "./hublink.ts";
 import type { DaemonHubLink } from "./link.ts";
 import { InputChannel } from "./input.ts";
@@ -94,6 +98,7 @@ export function createServer(cfg: Config, store: Store, hub: DaemonHubLink) {
       await route(req, res);
     } catch (err) {
       if (err instanceof HttpError) return json(res, err.status, { error: err.error, ...(err.detail ? { detail: err.detail } : {}) });
+      if (err instanceof AttachmentError) return json(res, err.status, { error: err.code, detail: err.detail });
       if (err instanceof HubOffline) return json(res, 503, { error: "hub_offline" });
       log("http.error", { method: req.method, url: req.url, detail: String(err) });
       if (!res.headersSent) json(res, 502, { error: "hub_error", detail: String((err as Error)?.message ?? err) });
@@ -139,6 +144,48 @@ export function createServer(cfg: Config, store: Store, hub: DaemonHubLink) {
     }
 
     if (m === "POST" && p === "/v1/send") return send(req, res);
+
+    // ---- uploads (uploads.md): the raw bytes are the body, streamed straight to data/uploads/<date>/ ----
+    if (m === "POST" && p === "/v1/uploads") {
+      const name = url.searchParams.get("name") ?? "";
+      if (!name.trim()) throw new HttpError(400, "bad_name", "?name= is required");
+      const declared = req.headers["content-length"] !== undefined ? Number(req.headers["content-length"]) : undefined;
+      if (declared !== undefined && declared > UPLOAD_MAX_LOCAL_BYTES)
+        throw new HttpError(413, "file_too_large", `${formatBytes(declared)} is over the ${formatBytes(UPLOAD_MAX_LOCAL_BYTES)} limit for one file`);
+      try {
+        const u = await storeFile(req, {
+          store,
+          uploadsDir: cfg.uploadsDir,
+          name,
+          mime: url.searchParams.get("mime") ?? (typeof req.headers["content-type"] === "string" && req.headers["content-type"] !== "application/octet-stream" ? req.headers["content-type"] : null),
+          maxBytes: UPLOAD_MAX_LOCAL_BYTES,
+          expectSize: declared,
+        });
+        log("upload.stored", { id: u.id, name: u.name, size: u.size });
+        return json(res, 201, u);
+      } catch (err) {
+        if (err instanceof UploadTooLarge) {
+          req.resume();
+          throw new HttpError(413, "file_too_large", `over the ${formatBytes(UPLOAD_MAX_LOCAL_BYTES)} limit for one file`);
+        }
+        if (err instanceof UploadMismatch) throw new HttpError(400, "incomplete_upload", err.message);
+        throw err;
+      }
+    }
+    if ((match = p.match(/^\/v1\/uploads\/([^/]+)$/))) {
+      const id = decodeURIComponent(match[1]);
+      if (!UPLOAD_ID_RE.test(id)) throw new HttpError(400, "bad_id");
+      const u = store.uploadGet(id);
+      if (!u) throw new HttpError(404, "not_found");
+      if (m === "GET") return json(res, 200, u);
+      if (m === "DELETE") {
+        // the composer's ✕ before sending: the file is removed from disk too
+        fs.rmSync(u.path, { force: true });
+        store.uploadDelete(id);
+        res.writeHead(204).end();
+        return;
+      }
+    }
 
     if (m === "GET" && p === "/v1/inbox") {
       const agent = url.searchParams.get("agent");
@@ -314,6 +361,15 @@ export function createServer(cfg: Config, store: Store, hub: DaemonHubLink) {
     if (replyTo !== null && typeof replyTo !== "string") throw new HttpError(400, "bad_reply_to");
     const hops = b.hops ?? 0;
     if (!Number.isInteger(hops) || hops < 0) throw new HttpError(400, "bad_hops");
+    let payload = b.body;
+    if (b.attachments !== undefined) {
+      const remote = crossesHub(b.to, cfg.user);
+      // the website has no file relay unless storage is set up for it (SETUP.md, "Files through the website")
+      if (remote && cfg.hubMode === "cloud" && b.attachments.length && !hub.relaysFiles)
+        throw new HttpError(501, "uploads_need_storage", "file uploads through the website need storage set up; see SETUP.md");
+      const attachments = resolveAttachments(store, b.attachments, remote);
+      if (attachments.length) payload = typeof payload === "string" ? { text: payload, attachments } : { ...payload, attachments };
+    }
 
     const env: Envelope = {
       id: randomUUID(),
@@ -322,7 +378,7 @@ export function createServer(cfg: Config, store: Store, hub: DaemonHubLink) {
       reply_to: replyTo,
       hops,
       type: b.type,
-      body: b.body,
+      body: payload,
       timestamp: new Date().toISOString(),
     };
     if (hops > HOP_LIMIT) {
@@ -345,6 +401,9 @@ export function createServer(cfg: Config, store: Store, hub: DaemonHubLink) {
     }
     return json(res, r.status, r.body);
   }
+
+  // a 2 GB upload from the browser can take longer than Node's default 5-minute request timeout
+  server.requestTimeout = 60 * 60_000;
 
   return {
     server,

@@ -9,6 +9,7 @@
     "fake-hub": "tsx test/fake-hub.ts",
     "test:e2e": "tsx test/e2e.ts",
     "test:calls": "tsx test/calls-e2e.ts",
+    "test:uploads": "tsx --test test/uploads.test.ts && tsx test/uploads-e2e.ts",
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {

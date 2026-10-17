@@ -164,6 +164,29 @@ What it can and can't do:
 
 It is as powerful as typing into the terminals yourself: a line sent to All goes to five Claudes at once. Check the ticked panes before you press Enter.
 
+## Files
+
+Every place you type in the app takes files: the chat box, the boss panel and the command bar. Click the paperclip, drop files onto the box, or paste a screenshot (Cmd+Shift+Ctrl+4, then Cmd+V). Any type works: images, PDFs, slides, video, audio, zips, jars. Each file uploads to your own daemon right away and shows a chip with its size and progress; the ✕ removes it, and Send waits until every file has finished.
+
+What the agent gets is the file on its own laptop plus a line `[attached: /full/path]` in its pane. Claude Code reads images and PDFs from that path and opens other types with its tools. Files are saved in `data/uploads/<date>/`, under their own names (made safe; a name that's already there becomes `name-2`).
+
+- To your own agents and panes, a file can be up to 2 GB. It never leaves your laptop.
+- To another person's agents over the LAN hub, a file can be up to 200 MB. Your daemon sends it to the hub first, their daemon downloads it and checks every byte (sha256), and only then does the message reach their pane. The hub deletes its copy after 7 days.
+- Through the website (cloud mode), files to other people don't work yet; see the next section. Files to your own agents still work from the app on your laptop.
+
+A file from someone else is shown to the agent like the rest of their message: as an untrusted request. Its name is cleaned up first so it can't fake a command or a path.
+
+### Files through the website
+
+The website has nowhere to keep a file between two laptops, so for now it refuses with "File uploads through the website need storage set up; see SETUP.md". The website's own chat box shows the same message, because a page on `https://` can't reach the daemon on your laptop. Use the app on your laptop (`http://127.0.0.1:7780`) for files to your own agents.
+
+Relaying files through the website needs two things, and neither exists yet:
+
+1. A private Supabase Storage bucket, for example `agentlink-files`, readable and writable only with the service role key (no public access, no policies for `anon` or `authenticated`). The owner creates it in the Supabase dashboard, under Storage.
+2. Code: API routes that hand a daemon a signed upload URL for a file it sends and a signed download URL for a file addressed to its user, a `files` table (id, uploader, to, name, size, sha256, created_at) in a new migration, and a cleanup job. The daemon side would then use the same order as on the LAN hub. The planned setting is `AGENTLINK_FILES_BUCKET=agentlink-files` (listed, commented out, in `cloud/.env.example`); nothing reads it yet.
+
+Until both are done, nothing about files touches the live website, its database or its storage.
+
 ## Troubleshooting
 
 The app or `team-up.sh` says the hub link is `connecting` or `reconnecting`.

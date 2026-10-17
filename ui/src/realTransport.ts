@@ -1,5 +1,5 @@
 import { PROTOCOL_VERSION } from "../../contracts/index.ts";
-import type { Address, ClientFrame, ContextEntry, DaemonHealth, ServerFrame, StoredMessage, UiBootstrap } from "../../contracts/index.ts";
+import type { Address, ClientFrame, ContextEntry, DaemonHealth, ServerFrame, StoredMessage, UiBootstrap, UploadResult } from "../../contracts/index.ts";
 import type { ConnectHandlers, ContextPutResult, MessageQuery, PaneInputResponse, PaneInputStatus, Transport } from "./lib.ts";
 import { screenStore } from "./screens.ts";
 import { clientProof, IMPOSTOR_MSG, randomHex, sameHex, serverProof } from "./auth.ts";
@@ -279,6 +279,34 @@ export function realTransport(daemonPort: number): Transport {
       } catch {
         return null;
       }
+    },
+    upload(file, name, onProgress, signal) {
+      // XHR, not fetch: fetch can't report upload progress
+      return new Promise<UploadResult>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const q = `name=${encodeURIComponent(name)}${file.type ? `&mime=${encodeURIComponent(file.type)}` : ""}`;
+        xhr.open("POST", `${daemon}/v1/uploads?${q}`);
+        xhr.setRequestHeader("content-type", "application/octet-stream");
+        xhr.upload.onprogress = (e) => onProgress(e.loaded);
+        xhr.onload = () => {
+          let j: { error?: string; detail?: string } & Partial<UploadResult> = {};
+          try {
+            j = JSON.parse(xhr.responseText);
+          } catch {}
+          if (xhr.status === 201) resolve(j as UploadResult);
+          else reject(new Error(j.detail || j.error || `the daemon answered ${xhr.status}`));
+        };
+        xhr.onerror = () => reject(new Error(`can't reach the daemon on :${daemonPort}`));
+        xhr.onabort = () => reject(new DOMException("upload cancelled", "AbortError"));
+        if (signal.aborted) return reject(new DOMException("upload cancelled", "AbortError"));
+        signal.addEventListener("abort", () => xhr.abort(), { once: true });
+        xhr.send(file);
+      });
+    },
+    async deleteUpload(id) {
+      try {
+        await fetch(`${daemon}/v1/uploads/${encodeURIComponent(id)}`, { method: "DELETE" });
+      } catch {}
     },
     subscribeScreens(addresses) {
       const next = [...new Set(addresses)].sort();

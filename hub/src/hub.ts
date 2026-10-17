@@ -25,7 +25,9 @@ import {
 } from "../../contracts/index.ts";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { clientProof, newNonce, personalToken, safeEqualHex, serverProof, validCnonce } from "./auth.ts";
+import { dirname, join, resolve } from "node:path";
 import { CONTEXT_KINDS, HubDb, rowToSession, toEnvelope } from "./db.ts";
+import { HubFiles } from "./files.ts";
 import { logInfo, logMsg } from "./log.ts";
 
 export interface HubOptions {
@@ -40,6 +42,7 @@ export interface HubOptions {
   sweepIntervalMs?: number;
   sessionTimeoutMs?: number;
   restSessionGraceMs?: number; // how long a REST session outlives its socket (default 60s)
+  filesDir?: string; // relayed files (uploads.md); default <folder of dbPath>/hub-files
 }
 
 interface Conn {
@@ -78,6 +81,7 @@ const isTarget = (a: unknown): a is string => a === "*" || (typeof a === "string
 
 export class Hub {
   readonly db: HubDb;
+  readonly files: HubFiles;
   readonly hubId: string;
   readonly server: Server;
   private wss: WebSocketServer;
@@ -93,11 +97,13 @@ export class Hub {
 
   constructor(readonly opts: HubOptions) {
     this.db = new HubDb(opts.dbPath);
+    this.files = new HubFiles(opts.filesDir ?? join(dirname(resolve(opts.dbPath)), "hub-files"));
     this.hubId = this.db.hubId();
     this.seq = this.db.lastSeq();
     // Sessions from a previous run have no live daemon yet.
     for (const s of this.db.allSessionRows()) if (!s.offline) this.db.setOffline(s.address, true);
     this.server = createServer((req, res) => this.handleHttp(req, res));
+    this.server.requestTimeout = 30 * 60_000; // a 200 MB file over slow Wi-Fi outlasts the 5-minute default
     this.wss = new WebSocketServer({ noServer: true });
     this.server.on("upgrade", (req, socket, head) => {
       if (new URL(req.url ?? "/", "http://x").pathname !== "/ws") return socket.destroy();
@@ -579,6 +585,7 @@ export class Hub {
     }
     const idle = this.opts.socketIdleMs ?? 45_000;
     for (const c of this.conns) if (now - c.lastSeen > idle) c.ws.terminate();
+    this.files.sweep(now);
   }
 
   // ----------------------------------------------------------------- context
@@ -659,6 +666,13 @@ export class Hub {
     try {
       const q = url.searchParams;
       let m: RegExpMatchArray | null;
+      if ((m = path.match(/^\/api\/files\/([^/]+)$/))) {
+        // only daemons move files: a UI session has no business uploading or fetching them
+        const role = this.restSessions.get(auth.slice(7))!.conn.role;
+        if (role !== "daemon") return send(403, { error: "daemon_only" });
+        if (req.method === "PUT") return await this.files.put(req, res, viewer, decodeURIComponent(m[1]));
+        if (req.method === "GET") return this.files.get(res, viewer, decodeURIComponent(m[1]));
+      }
       if (path === "/api/sessions" && req.method === "GET") return send(200, { users: this.presence() });
       if (path === "/api/screens" && req.method === "GET") return send(200, { screens: this.screenInfos() });
       if (path === "/api/messages" && req.method === "GET") {

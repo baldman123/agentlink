@@ -12,8 +12,11 @@ import {
   type ScreenUpdate,
   type ServerFrame,
 } from "../../contracts/index.ts";
+import { SHA256_RE, UPLOAD_ID_RE, sanitizeFileName, type Attachment, type OutboxItem } from "../../contracts/index.ts";
 import type { Config } from "./config.ts";
 import type { Discovery, HubTarget } from "./discovery.ts";
+import { attachmentsOf, crossesHub } from "./files.ts";
+import { PermanentFileError, getFromHub, putToHub } from "./hubfiles.ts";
 import { HubFinder, networkSignature, probeHubId } from "./finder.ts";
 import { log, logMsg } from "./log.ts";
 import type { Store } from "./store.ts";
@@ -66,6 +69,9 @@ export class HubLink extends EventEmitter {
   // Latest terminal screen per local agent. Memory only, never the outbox or SQLite (screens.md):
   // forwarded while connected; while offline only the latest survives, resent on reconnect.
   private screens = new Map<string, { screen: ScreenUpdate; at: string }>();
+  readonly relaysFiles = true; // the hub's /api/files (uploads.md)
+  private sendingFiles = false; // an outbox item's files are going up to the hub; the pump waits for them
+  private fetching = new Set<string>(); // envelope ids whose files are coming down from the hub
 
   constructor(
     private cfg: Config,
@@ -532,6 +538,11 @@ export class HubLink extends EventEmitter {
     this.store.dequeue(id);
     const env = item.envelope;
     logMsg("msg.rejected", env, { reason });
+    this.noteRejected(env, reason);
+  }
+
+  /** A local status note in the sender's inbox saying why a message didn't go out. */
+  private noteRejected(env: Envelope, reason: string) {
     const note: Envelope = {
       id: randomUUID(),
       from: `${this.cfg.user}/${SYSTEM_AGENT}`,
@@ -557,6 +568,22 @@ export class HubLink extends EventEmitter {
       this.write({ op: "ack", id: env.id }); // ack so the hub stops redelivering it
       return;
     }
+    // Files first (uploads.md): the envelope is stored and acked only once its files are on this laptop, so the
+    // bridge never pastes a path that isn't there yet.
+    if (attachmentsOf(env.body).length) {
+      if (this.fetching.has(env.id)) return; // a redelivery while the first copy's files are still downloading
+      this.fetching.add(env.id);
+      void this.fetchFiles(env)
+        .then((full) => {
+          if (full) this.storeDelivered(full);
+        })
+        .finally(() => this.fetching.delete(env.id));
+      return;
+    }
+    this.storeDelivered(env);
+  }
+
+  private storeDelivered(env: Envelope) {
     const stored: InboxItem | null = this.store.inboxInsert(env);
     logMsg("msg.received", env, { duplicate: !stored, remote: stored?.remote });
     this.write({ op: "ack", id: env.id });
@@ -573,8 +600,14 @@ export class HubLink extends EventEmitter {
   pump(all: boolean) {
     if (!this.connected) return;
     const now = new Date();
+    if (this.sendingFiles) return;
     const items = all ? this.store.outboxAll() : this.store.outboxDue(now.toISOString());
     for (const item of items) {
+      if (this.filesToSend(item.envelope).length) {
+        // its files go to the hub first; the pump picks up again (this item included) once they're there
+        void this.sendFiles(item);
+        return;
+      }
       if (!this.write({ op: "send", envelope: item.envelope })) return;
       const attempts = item.attempts + 1;
       const wait = Math.min(RESEND_MAX_MS, RESEND_AFTER_MS * 2 ** (attempts - 1));
@@ -586,6 +619,86 @@ export class HubLink extends EventEmitter {
       );
       logMsg("msg.sent", item.envelope, { attempt: attempts });
     }
+  }
+
+  // ------------------------------------------------------------------ files (uploads.md "LAN hub")
+
+  /** The attachments of an outgoing envelope that the current hub doesn't have yet. */
+  private filesToSend(env: Envelope): Attachment[] {
+    if (!crossesHub(env.to, this.cfg.user)) return []; // own agents: the files are already on this laptop
+    const hub = this.pinnedId() ?? "";
+    return attachmentsOf(env.body).filter((a) => this.store.getKv(`hubfile:${hub}:${a.id}`) === null);
+  }
+
+  private async sendFiles(item: OutboxItem) {
+    if (this.sendingFiles) return;
+    this.sendingFiles = true;
+    const env = item.envelope;
+    try {
+      for (const a of this.filesToSend(env)) {
+        if (!this.connected || !this.target || !this.session) return; // after reconnect the pump tries again
+        const local = this.store.uploadGet(a.id);
+        if (!local) throw new PermanentFileError(`${a.name} is no longer on this laptop`);
+        const started = Date.now();
+        await putToHub(this.target.url, this.session, { ...a, path: local.path }, env.to);
+        this.store.setKv(`hubfile:${this.pinnedId() ?? ""}:${a.id}`, new Date().toISOString());
+        log("file.sent", { id: a.id, msg: env.id, size: a.size, ms: Date.now() - started });
+      }
+    } catch (err) {
+      if (err instanceof PermanentFileError) {
+        this.store.dequeue(env.id);
+        logMsg("msg.rejected", env, { reason: "file_refused", detail: err.message });
+        this.noteRejected(env, `not sent: ${err.message}`);
+      } else {
+        const attempts = item.attempts + 1;
+        const wait = Math.min(RESEND_MAX_MS, RESEND_AFTER_MS * 2 ** (attempts - 1));
+        this.store.markAttempt(env.id, attempts, new Date(Date.now() + wait).toISOString(), `file upload failed: ${String((err as Error)?.message ?? err)}`);
+        log("file.send_failed", { msg: env.id, attempt: attempts, detail: String((err as Error)?.message ?? err) });
+      }
+    } finally {
+      this.sendingFiles = false;
+    }
+    this.pump(false);
+  }
+
+  /**
+   * Download a delivered envelope's files and point its attachments at the local copies. A file that can't be had
+   * (gone from the hub, wrong checksum) gets `error` instead of `path`, and the message is still stored. Returns null
+   * when the link dropped mid-way: the envelope stays unacked and the hub delivers it again after the reconnect.
+   */
+  private async fetchFiles(env: Envelope): Promise<Envelope | null> {
+    const out: Attachment[] = [];
+    for (const a of attachmentsOf(env.body)) {
+      const { path: _drop, error: _err, ...meta } = a;
+      // the sender wrote these fields; never use them in a URL or a file name unchecked
+      if (typeof a.id !== "string" || !UPLOAD_ID_RE.test(a.id) || typeof a.sha256 !== "string" || !SHA256_RE.test(a.sha256) || !Number.isInteger(a.size) || a.size < 0) {
+        out.push({ id: String(a.id ?? "").slice(0, 64), name: sanitizeFileName(String(a.name ?? "file")), size: 0, sha256: "", error: "malformed attachment" });
+        continue;
+      }
+      meta.name = sanitizeFileName(String(a.name ?? "file"));
+      const local = this.store.uploadGet(a.id);
+      if (local && local.sha256 === a.sha256) {
+        out.push({ ...meta, path: local.path });
+        continue;
+      }
+      let done: Attachment | null = null;
+      for (let attempt = 1; attempt <= 3 && !done; attempt++) {
+        if (!this.connected || !this.target || !this.session) return null;
+        try {
+          const started = Date.now();
+          const p = await getFromHub(this.target.url, this.session, meta, this.store, this.cfg.uploadsDir);
+          log("file.received", { id: a.id, msg: env.id, size: a.size, ms: Date.now() - started });
+          done = { ...meta, path: p };
+        } catch (err) {
+          const why = String((err as Error)?.message ?? err);
+          log("file.receive_failed", { id: a.id, msg: env.id, attempt, detail: why });
+          if (err instanceof PermanentFileError || attempt === 3) done = { ...meta, error: why };
+          else await new Promise((r) => setTimeout(r, 2_000));
+        }
+      }
+      out.push(done!);
+    }
+    return { ...env, body: { ...(env.body as object), attachments: out } };
   }
 
   // ------------------------------------------------------------------ sessions

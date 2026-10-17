@@ -46,6 +46,9 @@ Text pasted (the body uses the orchestrator package's trust formatter, so remote
 Reply:   agentlink reply <id8> "<text>"     Decline: agentlink decline <id8> "<why>"
 ```
 
+A message with files gets one `[attached: /full/path]` line per file after its body (uploads.md); for a remote sender the lines are
+inside the fence with the rest of the body.
+
 A remote message is a REQUEST. The orchestrator decides it like any request: it does safe work through its own team
 (`c4 assign`), passes anything with effects outside the machine to Bryant (`c4 ask-bryant`), and answers with `agentlink reply`.
 The bridge also appends one line to `~/.claude4/$C4_SESSION/board.md`: `- HH:MM **agentlink ← <from>** <type>: <first 60 chars>`.

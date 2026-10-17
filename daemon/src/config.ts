@@ -17,6 +17,7 @@ export interface Config {
   hubId: string | null; // AGENTLINK_HUB_ID: pinned from the start; the daemon connects to nothing else
   scan: boolean; // AGENTLINK_SCAN (default on): probe the local subnet for the pinned hub
   scanHosts: string[] | null; // AGENTLINK_SCAN_HOSTS (tests): "host" or "host:port" entries, replaces the subnet
+  uploadsDir: string; // AGENTLINK_UPLOADS_DIR, default <folder of the db>/uploads: files land in <uploadsDir>/<YYYY-MM-DD>/
 }
 
 const USER_RE = /^[a-z0-9_-]{1,32}$/;
@@ -69,5 +70,7 @@ export function loadConfig(env = process.env): Config {
   const repin = env.AGENTLINK_HUB_REPIN === "1";
   const uiOrigin = env.AGENTLINK_UI_ORIGIN || "http://127.0.0.1:7780";
   if (!/^https?:\/\/[^/]+$/.test(uiOrigin)) fail("AGENTLINK_UI_ORIGIN must be an origin like http://127.0.0.1:7780");
-  return { user, token, hubUrl, hubMode, discovery, hubName, repin, port, dbPath, logPath, uiOrigin, hubId, scan, scanHosts };
+  // team-up keeps the db in the data folder, so uploads go to data/uploads (uploads.md)
+  const uploadsDir = path.resolve(env.AGENTLINK_UPLOADS_DIR || path.join(path.dirname(dbPath), "uploads"));
+  return { user, token, hubUrl, hubMode, discovery, hubName, repin, port, dbPath, logPath, uiOrigin, hubId, scan, scanHosts, uploadsDir };
 }

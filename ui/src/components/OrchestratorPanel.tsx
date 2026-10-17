@@ -4,6 +4,7 @@ import { HUMAN_AGENT } from "../../../contracts/index.ts";
 import { relTime } from "../lib.ts";
 import { bossPending, findSession, inBossThread } from "../store.ts";
 import { Skeleton, StatusDot, useApp, useNow } from "./bits.tsx";
+import { AttachButton, AttachmentChips, useAttachments } from "./Attachments.tsx";
 import { MessageList, useSend } from "./ChatView.tsx";
 
 /**
@@ -63,18 +64,27 @@ function BossComposer() {
   const { send, busy, err } = useSend();
   const [text, setText] = useState("");
   const ta = useRef<HTMLTextAreaElement>(null);
+  const files = useAttachments(false); // the boss is on this laptop
+  const ready = (!!text.trim() || files.ids.length > 0) && !files.blocker;
   const go = async () => {
-    if (!text.trim() || busy) return;
-    if (await send({ to: `${state.me}/orchestrator`, type: "chat", body: text })) setText("");
+    if (!ready || busy) return;
+    if (await send({ to: `${state.me}/orchestrator`, type: "chat", body: text, attachments: files.ids })) {
+      setText("");
+      files.clear();
+    }
     ta.current?.focus();
   };
   return (
-    <div className="bp-composer">
+    <div className={`bp-composer ${files.dragging ? "drop-on" : ""}`} {...files.dropHandlers}>
+      {files.dragging && <div className="drop-hint" aria-hidden>Drop files for the boss</div>}
+      <AttachmentChips items={files.items} onRemove={files.remove} crossesHub={false} />
+      <AttachButton onFiles={files.add} className="bp-attach" />
       <textarea
         ref={ta}
         value={text}
         rows={1}
         placeholder="Message the boss…"
+        onPaste={files.onPaste}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -84,8 +94,9 @@ function BossComposer() {
         }}
         aria-label="Message the boss"
       />
-      <button className="btn btn-primary" onClick={go} disabled={!text.trim() || busy}>{busy ? "…" : "Send"}</button>
+      <button className="btn btn-primary" onClick={go} disabled={!ready || busy}>{busy ? "…" : "Send"}</button>
       {err && <div className="err bp-err">{err}</div>}
+      {!err && (files.blocker || files.notice) && <div className="hint bp-err">{files.blocker || files.notice}</div>}
     </div>
   );
 }

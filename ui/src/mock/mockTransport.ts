@@ -12,6 +12,7 @@ import type {
   Session,
   SessionStatus,
   StoredMessage,
+  UploadResult,
   UserPresence,
 } from "../../../contracts/index.ts";
 import { involves, PANE_INPUT_MAX, params, userOf, type ConnectHandlers, type PaneInputStatus, type PaneResult, type Transport } from "../lib.ts";
@@ -270,7 +271,13 @@ export function mockTransport(daemonPort: number): Transport {
   const hubUrl = () => `http://${hubIp}:7700`;
 
   let mockSession: string | null = null;
+  const uploads = new Map<string, UploadResult>();
   const api = {
+    /** files "uploaded" so far, and ids removed with ✕ (tests check the composer) */
+    uploads: [] as UploadResult[],
+    deletedUploads: [] as string[],
+    /** text typed into panes through the command bar */
+    paneTexts: [] as string[],
     /** v2 handshakes attempted (tests check an impostor is not retried) */
     handshakes: 0,
     /** current REST session from the last welcome (REST calls are refused without one) */
@@ -418,10 +425,38 @@ export function mockTransport(daemonPort: number): Transport {
         .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
         .slice(0, q.limit ?? 50);
     },
+    upload(file, name, onProgress, signal) {
+      // pretends to stream: 5 progress steps over ~0.5s. ?mockupload=fail makes every upload fail.
+      return new Promise<UploadResult>((resolve, reject) => {
+        let step = 0;
+        const t = window.setInterval(() => {
+          if (signal.aborted) {
+            window.clearInterval(t);
+            return reject(new DOMException("upload cancelled", "AbortError"));
+          }
+          step++;
+          onProgress(Math.round((file.size * step) / 5));
+          if (step < 5) return;
+          window.clearInterval(t);
+          if (params.get("mockupload") === "fail") return reject(new Error("the daemon answered 507"));
+          const day = new Date().toISOString().slice(0, 10);
+          const u: UploadResult = { id: uuid(), name, size: file.size, sha256: "0".repeat(64), path: `/mock/agentlink/data/uploads/${day}/${name}`, created_at: iso(), ...(file.type ? { mime: file.type } : {}) };
+          uploads.set(u.id, u);
+          api.uploads.push(u);
+          resolve(u);
+        }, 100);
+      });
+    },
+    async deleteUpload(id) {
+      uploads.delete(id);
+      api.deletedUploads.push(id);
+    },
     async send(req) {
+      const files = (req.attachments ?? []).map((id) => uploads.get(id)).filter((u): u is UploadResult => !!u);
+      const body: Envelope["body"] = files.length ? { ...(typeof req.body === "string" ? { text: req.body } : req.body), attachments: files } : req.body;
       const env: Envelope = {
         id: uuid(), from: `${me}/${req.from_agent ?? "orchestrator"}`, to: req.to, reply_to: req.reply_to ?? null,
-        hops: req.hops ?? 0, type: req.type, body: req.body, timestamp: iso(),
+        hops: req.hops ?? 0, type: req.type, body, timestamp: iso(),
       };
       const m = sendMsg(env.from, env.to, env.type, env.body, env.reply_to);
       // the boss: thinks for a few seconds (status flips to working), then answers with reply_to.
@@ -453,6 +488,7 @@ export function mockTransport(daemonPort: number): Transport {
         return { ok: false as const, kind: "no_bridge" as const, message: "No bridge is connected on this laptop, so nothing can be typed into the panes. Start it with scripts/team-up.sh, then try again." };
       if (!req.agents.length || !req.text || req.text.length > PANE_INPUT_MAX) return { ok: false as const, kind: "bad_request" as const, message: "Bad input request." };
       const id = uuid();
+      api.paneTexts.push(req.text);
       inputs.set(id, { id, state: "pending" });
       // the "bridge" types it a moment later, one pane at a time
       setTimeout(() => {

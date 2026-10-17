@@ -9,6 +9,7 @@ import type {
   ServerFrame,
   StoredMessage,
   UiBootstrap,
+  UploadResult,
 } from "../../contracts/index.ts";
 
 export type ConnState = "connecting" | "connected" | "reconnecting" | "offline";
@@ -63,7 +64,14 @@ export interface Transport {
   paneInputStatus(id: string): Promise<PaneInputStatus | null>;
   /** GET /v1/health on the daemon: how it found the hub, the pinned hub_id, and whether it is searching. */
   health(): Promise<DaemonHealth | null>;
+  /** Streams one file to this laptop's daemon (POST /v1/uploads, uploads.md). `onProgress` gets bytes sent so far. */
+  upload(file: Blob, name: string, onProgress: (loaded: number) => void, signal: AbortSignal): Promise<UploadResult>;
+  /** The ✕ on a chip before sending: deletes the uploaded file again. Best effort. */
+  deleteUpload(id: string): Promise<void>;
 }
+
+/** Why uploads can't work here at all (the website without file storage); the composer shows `message`. */
+export class UploadUnavailable extends Error {}
 
 export const HUB_VIA_LABEL: Record<NonNullable<DaemonHealth["hub"]["via"]>, string> = {
   mdns: "mDNS",

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Envelope, InboxItem, OutboxItem, Session, SessionKind, SessionStatus } from "../../contracts/index.ts";
+import type { Envelope, InboxItem, OutboxItem, Session, SessionKind, SessionStatus, UploadResult } from "../../contracts/index.ts";
 
 // Durable state for one daemon: outbox, inbox, local sessions, and a small key/value table.
 export class Store {
@@ -39,7 +39,36 @@ export class Store {
         last_activity TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS uploads (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        mime TEXT,
+        created_at TEXT NOT NULL
+      );
     `);
+  }
+
+  // ---- uploads (uploads.md): files stored on this laptop, uploaded here or downloaded from the hub ----
+  uploadInsert(u: UploadResult) {
+    this.db
+      .prepare("INSERT OR REPLACE INTO uploads (id, name, path, size, sha256, mime, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(u.id, u.name, u.path, u.size, u.sha256, u.mime ?? null, u.created_at);
+  }
+  /** The stored file, or null when unknown or deleted from disk since. */
+  uploadGet(id: string): UploadResult | null {
+    const r = this.db.prepare("SELECT * FROM uploads WHERE id = ?").get(id) as UploadRow | undefined;
+    if (!r) return null;
+    if (!fs.existsSync(r.path)) {
+      this.uploadDelete(id);
+      return null;
+    }
+    return { id: r.id, name: r.name, path: r.path, size: r.size, sha256: r.sha256, created_at: r.created_at, ...(r.mime ? { mime: r.mime } : {}) };
+  }
+  uploadDelete(id: string): boolean {
+    return Number(this.db.prepare("DELETE FROM uploads WHERE id = ?").run(id).changes) > 0;
   }
 
   close() {
@@ -176,6 +205,15 @@ interface InboxRow {
   received_at: string;
   handled: number;
   remote: number;
+}
+interface UploadRow {
+  id: string;
+  name: string;
+  path: string;
+  size: number;
+  sha256: string;
+  mime: string | null;
+  created_at: string;
 }
 interface SessionRow {
   agent: string;

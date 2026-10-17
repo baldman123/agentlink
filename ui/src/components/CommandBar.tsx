@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { UserPresence } from "../../../contracts/index.ts";
 import { PANE_INPUT_MAX, saveStorage, type PaneInputStatus, type PaneResult } from "../lib.ts";
 import { cutoffKey } from "../store.ts";
+import { AttachButton, AttachmentChips, useAttachments } from "./Attachments.tsx";
 import { useApp } from "./bits.tsx";
 
 const PANES = [
@@ -78,15 +79,21 @@ export function CommandBar({ team }: { team: UserPresence }) {
     return true;
   };
 
+  const files = useAttachments(false); // own panes: the files are already on this laptop
   const send = async () => {
-    const body = text.trim();
+    if (files.blocker) return;
+    const typed = text.trim();
+    // one line, so the Enter after it submits everything: "look at this [attached: /…/shot.png]"
+    const body = [typed, ...files.paths.map((p) => `[attached: ${p}]`)].filter(Boolean).join(" ");
     if (await submit(body)) {
-      history.current = [body, ...history.current.filter((h) => h !== body)].slice(0, 30);
+      if (typed) history.current = [typed, ...history.current.filter((h) => h !== typed)].slice(0, 30);
       histIdx.current = -1;
       setText("");
+      files.clear();
     }
     input.current?.focus();
   };
+  const ready = (!!text.trim() || files.paths.length > 0) && !files.blocker && targets.length > 0 && !posting;
 
   const reset = async () => {
     setConfirm(false);
@@ -107,13 +114,15 @@ export function CommandBar({ team }: { team: UserPresence }) {
     });
 
   return (
-    <div className="cmdbar" aria-label={`Type into ${team.user}'s panes`}>
+    <div className={`cmdbar ${files.dragging ? "drop-on" : ""}`} aria-label={`Type into ${team.user}'s panes`} {...files.dropHandlers}>
+      {files.dragging && <div className="drop-hint" aria-hidden>Drop files to type their paths into the panes</div>}
       <div className="cmd-row">
         <label className="cmd-field">
           <span className="cmd-glyph" aria-hidden>❯</span>
           <input
             ref={input}
             value={text}
+            onPaste={files.onPaste}
             maxLength={PANE_INPUT_MAX}
             placeholder={targets.length ? `Type into ${all ? "every pane" : targets.map(labelOf).join(", ")}…` : "Pick at least one pane"}
             onChange={(e) => setText(e.target.value)}
@@ -148,13 +157,16 @@ export function CommandBar({ team }: { team: UserPresence }) {
             <span>All</span>
           </label>
         </div>
-        <button className="btn btn-primary cmd-send" onClick={send} disabled={!text.trim() || !targets.length || posting}>
+        <AttachButton onFiles={files.add} className="cmd-attach" />
+        <button className="btn btn-primary cmd-send" onClick={send} disabled={!ready}>
           {posting ? "Sending…" : "Send"} <kbd className="kbd">↵</kbd>
         </button>
         <button className="btn cmd-reset" onClick={() => { setClearHistory(false); setConfirm(true); }} disabled={!targets.length || posting}>
           Reset chats
         </button>
       </div>
+      <AttachmentChips items={files.items} onRemove={files.remove} crossesHub={false} />
+      {(files.blocker || files.notice) && files.items.length > 0 && <div className="cmd-hint att-hint">{files.blocker || files.notice}</div>}
       {run && <Results run={run} onDismiss={() => setRun(null)} />}
       {confirm && (
         <div className="scrim" onMouseDown={() => setConfirm(false)}>
